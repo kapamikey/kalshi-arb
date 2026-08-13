@@ -1,0 +1,27 @@
+[Unit]
+Description=Kalshi Autonomous Sports Trader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kalshi
+WorkingDirectory=/home/kalshi/kalshi-arb
+Environment=PATH=/home/kalshi/.bullpen/bin:/usr/local/bin:/usr/bin:/bin
+# Continuous loop; --live is intentionally OMITTED here (dry-run by default).
+# After the burn-in period, add --live to ExecStart and `systemctl daemon-reload && restart`.
+ExecStart=/usr/bin/python3 scripts/run_bot.py \
+    --interval 300 \
+    --min-edge 2 \
+    --max-contracts 5 \
+    --profit-target-cents 8 \
+    --daily-loss-limit-pct 0.20 \
+    --max-exposure-pct 0.50 \
+    --per-trade-pct 0.10
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/home/kalshi/kalshi-arb/data/logs/service_stdout.log
+StandardError=append:/home/kalshi/kalshi-arb/data/logs/service_stderr.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+.env
+*.pem
+config/kalshi-private-key.pem
+data/snapshots/
+data/logs/
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+.DS_Store
