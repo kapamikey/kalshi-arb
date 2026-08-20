@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.api.client import KalshiClient
-from src.utils import ledger
+from src.utils import ledger, portfolio_log
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,35 @@ def run_bullpen(args: list[str], timeout: int = 60) -> dict | None:
     except (subprocess.TimeoutExpired, json.JSONDecodeError) as e:
         logger.warning(f"Bullpen command failed: {e}")
         return None
+
+
+def check_bullpen_auth() -> tuple[bool, str]:
+    """Is the Bullpen login usable for pulling whale signals?
+
+    The refresh token silently expiring is what killed the whale feed for 133
+    cycles — the bot just logged 'Bullpen error:' and quietly fell back to the
+    internal scan. Surface it loudly instead.
+
+    Returns (ok, detail).
+    """
+    env = {**__import__("os").environ}
+    env["PATH"] = str(Path.home() / ".bullpen" / "bin") + ":" + env.get("PATH", "")
+    try:
+        result = subprocess.run(
+            ["bullpen", "doctor", "auth"],
+            capture_output=True, text=True, timeout=45, env=env,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        return False, f"bullpen CLI unavailable: {e}"
+
+    out = result.stdout or ""
+    for line in out.splitlines():
+        low = line.lower()
+        if "token:" in low and "expired" in low:
+            return False, line.strip()
+    if "Valid" in out or "Ready" in out:
+        return True, "token valid"
+    return False, "could not determine auth state — run: bullpen login"
 
 
 def series_of(ticker: str) -> str:
@@ -164,7 +193,8 @@ class SmartMoneyBot:
         min_price_cents: int = 5,
         top_n_traders: int = 10,
         dry_run: bool = True,
-        profit_target_cents: int = 8,
+        take_profit_pct: float = 0.20,
+        stop_loss_pct: float = 0.50,
         daily_loss_limit_pct: float = 0.20,
         max_exposure_pct: float = 0.50,
         per_trade_pct: float = 0.10,
@@ -173,6 +203,7 @@ class SmartMoneyBot:
         max_market_pages: int = 60,
         internal_min_spread_cents: int = 4,
         internal_min_open_interest: float = 100.0,
+        whale_only: bool = True,
     ):
         self.client = kalshi_client
         self.min_trader_pnl = min_trader_pnl
@@ -182,7 +213,8 @@ class SmartMoneyBot:
         self.min_price_cents = min_price_cents
         self.top_n_traders = top_n_traders
         self.dry_run = dry_run
-        self.profit_target_cents = profit_target_cents
+        self.take_profit_pct = take_profit_pct
+        self.stop_loss_pct = stop_loss_pct
         self.daily_loss_limit_pct = daily_loss_limit_pct
         self.max_exposure_pct = max_exposure_pct
         self.per_trade_pct = per_trade_pct
@@ -191,16 +223,19 @@ class SmartMoneyBot:
         self.max_market_pages = max_market_pages
         self.internal_min_spread_cents = internal_min_spread_cents
         self.internal_min_open_interest = internal_min_open_interest
+        self.whale_only = whale_only
         self._kalshi_market_cache: dict[str, list[dict]] = {}
         self._kalshi_markets_by_ticker: dict[str, dict] = {}
         self._sports_series: set[str] = set()
         self._kalshi_cache_time: float = 0
         self._balance_cents: int = 0
+        self._portfolio_value_cents: int = 0
+        self._account_value_cents: int = 0
         self._start_of_day_balance_cents: int = 0
         self._current_day: str = ""
 
     def refresh_balance(self):
-        """Fetch current available balance from Kalshi."""
+        """Fetch current available balance + open-position value from Kalshi."""
         try:
             resp = self.client.get_balance()
             # Kalshi returns `balance` in integer cents and `balance_dollars` as a
@@ -209,10 +244,18 @@ class SmartMoneyBot:
                 self._balance_cents = int(round(float(resp["balance_dollars"]) * 100))
             else:
                 self._balance_cents = int(resp.get("balance", 0))
-            logger.info(f"Kalshi balance: ${self._balance_cents / 100:.2f}")
+            # portfolio_value is already in cents (current value of open positions).
+            self._portfolio_value_cents = int(resp.get("portfolio_value", 0) or 0)
+            self._account_value_cents = self._balance_cents + self._portfolio_value_cents
+            logger.info(
+                f"Kalshi balance: ${self._balance_cents / 100:.2f}  "
+                f"(account value ${self._account_value_cents / 100:.2f})"
+            )
         except Exception as e:
             logger.warning(f"Failed to fetch balance: {e}")
             self._balance_cents = 0
+            self._portfolio_value_cents = 0
+            self._account_value_cents = 0
 
     # ── Step 1: Get Polymarket smart money signals ──
 
@@ -265,6 +308,19 @@ class SmartMoneyBot:
             positions = self.get_trader_positions(address)
 
             for pos in positions:
+                # Once a Polymarket market settles, its price snaps to exactly
+                # $1.00 (won) or $0.00 (lost) — that's history, not a live
+                # signal. Feeding it into the edge calc as "the whale thinks
+                # this is 100% certain" produced nonsense like a +99c edge on
+                # a market that finished days ago. Only trust positions still
+                # actively trading (resolution_status == "open", not yet
+                # redeemable) as evidence of what the trader currently believes.
+                resolution = pos.get("resolution_status")
+                if resolution is not None and resolution != "open":
+                    continue
+                if pos.get("redeemable"):
+                    continue
+
                 value = pos.get("current_value", 0) or 0
                 if value < 100:  # skip tiny positions
                     continue
@@ -641,8 +697,10 @@ class SmartMoneyBot:
 
     def place_take_profit(self, opp: CrossPlatformOpportunity, buy_client_id: str,
                           entry_cents: int, contracts: int):
-        """Rest a limit sell at entry + profit_target_cents (live only)."""
-        target = min(entry_cents + self.profit_target_cents, 99)
+        """Rest a limit sell at entry * (1 + take_profit_pct) — a 20% gross
+        return by default (live only)."""
+        target = min(round(entry_cents * (1 + self.take_profit_pct)), 99)
+        target = max(target, entry_cents + 1)  # always at least 1c above entry
         tp_client_id = str(uuid.uuid4())
         result = self.place_order(
             opp.kalshi_ticker, "ask", target, contracts, client_order_id=tp_client_id
@@ -655,6 +713,82 @@ class SmartMoneyBot:
             logger.info(
                 f"  Take-profit rested: ask {contracts}x {opp.kalshi_ticker} @ {target}c"
             )
+
+    def check_stop_losses(self) -> int:
+        """Exit any open position whose price has fallen stop_loss_pct below
+        entry — checked every cycle, both dry-run (simulated exit against the
+        real market price) and live (cancels the resting take-profit, then
+        sells at the current bid to cut the loss now rather than ride it to
+        settlement).
+
+        Runs before settlement finalizes, so this only fires on markets still
+        actively trading; check_settlements handles anything already decided.
+
+        Capped at 200 checks/cycle — a network call per open row means an
+        unbounded backlog (e.g. after a long outage) would make one cycle run
+        for minutes and hammer the Kalshi API. Anything past the cap is picked
+        up on the next cycle; it's a bounded delay, not a dropped check.
+        """
+        triggered = 0
+        open_rows = ledger.open_trades()
+        if len(open_rows) > 200:
+            logger.warning(
+                f"{len(open_rows)} open positions — checking the first 200 "
+                f"this cycle, rest deferred to next cycle"
+            )
+            open_rows = open_rows[:200]
+        for r in open_rows:
+            ticker = r.get("ticker")
+            entry = int(r.get("entry_price_cents", 0) or 0)
+            contracts = int(r.get("contracts", 0) or 0)
+            if not ticker or entry <= 0 or contracts <= 0:
+                continue
+
+            try:
+                resp = self.client.get_market(ticker)
+                m = resp.get("market", resp)
+            except Exception as e:
+                logger.warning("Stop-loss check failed for %s: %s", ticker, e)
+                continue
+
+            if m.get("status") not in (None, "active", "open"):
+                continue  # already finalized — check_settlements handles it
+
+            bid = self._cents(m.get("yes_bid_dollars"))
+            if bid is None:
+                continue
+
+            floor = int(entry * (1 - self.stop_loss_pct))
+            if bid > floor:
+                continue  # still above the stop — hold
+
+            exit_price = max(bid, 1)
+            pnl = (exit_price - entry) * contracts
+            is_dry = r.get("dry_run", self.dry_run)
+
+            if not is_dry:
+                tp_id = r.get("take_profit_order_id")
+                if tp_id:
+                    try:
+                        self.client.cancel_order(tp_id)
+                    except Exception as e:
+                        logger.warning(f"Could not cancel resting take-profit {tp_id}: {e}")
+                self.place_order(ticker, "ask", exit_price, contracts)
+
+            ledger.update_trade(r["client_order_id"], {
+                "status": ledger.CLOSED,
+                "realized_pnl_cents": pnl,
+                "settled_ts": ledger._utc_now_iso(),
+                "exit_reason": "stop_loss",
+                "exit_price_cents": exit_price,
+            })
+            triggered += 1
+            logger.warning(
+                f"STOP-LOSS: {'[DRY RUN] ' if is_dry else ''}{ticker} exited @ "
+                f"{exit_price}c (entry {entry}c, -{self.stop_loss_pct:.0%} floor) "
+                f"{pnl:+d}c"
+            )
+        return triggered
 
     # ── Main loop ──
 
@@ -669,9 +803,14 @@ class SmartMoneyBot:
                 if opp and opp.confidence >= self.min_confidence:
                     opportunities.append(opp)
 
-        for opp in self.scan_internal_mispricing():
-            if opp.confidence >= self.min_confidence:
-                opportunities.append(opp)
+        # The internal scan treats a wide bid/ask spread as if it were edge,
+        # which is backwards — a wide spread means illiquid and expensive to
+        # exit, not underpriced. It produced 93% of all historical picks and a
+        # 15% win rate. Off by default; --allow-internal opts back in.
+        if not self.whale_only:
+            for opp in self.scan_internal_mispricing():
+                if opp.confidence >= self.min_confidence:
+                    opportunities.append(opp)
 
         # Dedupe by ticker — a market can match many whale signals / keywords.
         # Keep the highest-confidence instance of each.
@@ -691,18 +830,44 @@ class SmartMoneyBot:
         logger.info("Starting scan cycle")
         logger.info("=" * 60)
 
-        # 0. Reconcile prior open bets against settlement, refresh balance/day state.
-        # Balance is a read-only GET, so we fetch it even in dry-run to make the
-        # simulation faithful (sizing and ledger recording depend on it).
+        # 0. Account upkeep runs EVERY cycle regardless of whale-feed health —
+        # balance, settlement, stop-loss, and portfolio tracking are all
+        # read-only or protective and must not depend on whether we found any
+        # new signal to trade on. Only "look for a NEW trade" is gated below.
         self.refresh_balance()
         self._ensure_day_state()
         settled = ledger.check_settlements(self.client)
         if settled:
-            s = ledger.summary()
+            summ = ledger.summary()
             logger.info(
-                f"Ledger: {s['won']}W/{s['lost']}L ({s['win_rate']:.0%} WR), "
-                f"realized {s['realized_pnl_cents']:+d}c, {s['open']} open"
+                f"Ledger: {summ['won']}W/{summ['lost']}L ({summ['win_rate']:.0%} WR), "
+                f"realized {summ['realized_pnl_cents']:+d}c, {summ['open']} open"
             )
+
+        stopped_out = self.check_stop_losses()
+        if stopped_out:
+            logger.info(f"Stop-loss triggered on {stopped_out} position(s) this cycle")
+
+        # Portfolio-growth tracking — the only metric that matters: is the
+        # account value going up over time. Recorded every cycle, unconditionally.
+        portfolio_log.record_snapshot(self._account_value_cents / 100)
+
+        # Whale feed health — a silently-expired Bullpen token is what made the
+        # bot spend 133 cycles on internal spread-traps with no big money behind
+        # any of it. Fail loudly, and say exactly how to fix it. This only gates
+        # looking for NEW trades — everything above already ran.
+        auth_ok, auth_detail = check_bullpen_auth()
+        if auth_ok:
+            logger.info(f"Whale feed: OK ({auth_detail})")
+        else:
+            logger.error("=" * 60)
+            logger.error(f"WHALE FEED DOWN: {auth_detail}")
+            logger.error("Fix with:  bullpen login")
+            if self.whale_only:
+                logger.error("whale-only mode: no new signal source this cycle — skipping.")
+            logger.error("=" * 60)
+            if self.whale_only:
+                return []
 
         # 1. Collect opportunities from both signal sources.
         opportunities = self.collect_opportunities()
@@ -711,9 +876,10 @@ class SmartMoneyBot:
         if opportunities:
             logger.info(f"\nFound {len(opportunities)} opportunities:")
             for i, opp in enumerate(opportunities[:15], 1):
+                conf10 = max(1, round(opp.confidence * 10))
                 logger.info(
                     f"  {i}. [{opp.signal_type}] [{opp.edge_cents:+.1f}c edge] "
-                    f"[conf {opp.confidence:.0%}] {opp.kalshi_title[:60]}"
+                    f"[confidence {conf10}/10] {opp.kalshi_title[:60]}"
                 )
                 logger.info(
                     f"     ask {opp.kalshi_yes_ask}c / bid {opp.kalshi_yes_bid}c"
@@ -778,6 +944,7 @@ class SmartMoneyBot:
                 "series": opp.series_ticker,
                 "signal_type": opp.signal_type,
                 "confidence": opp.confidence,
+                "confidence_10": max(1, round(opp.confidence * 10)),
                 "edge_cents": round(opp.edge_cents, 2),
                 "entry_price_cents": int(opp.kalshi_yes_ask),
                 "contracts": contracts,
@@ -807,6 +974,8 @@ class SmartMoneyBot:
         logger.info(f"  Min trader PnL: ${self.min_trader_pnl:,.0f}")
         logger.info(f"  Min edge: {self.min_edge_cents}c")
         logger.info(f"  Max contracts: {self.max_contracts}")
+        logger.info(f"  Take-profit: +{self.take_profit_pct:.0%} gross | Stop-loss: -{self.stop_loss_pct:.0%}")
+        logger.info(f"  Whale-only: {self.whale_only}")
         logger.info(f"  Dry run: {self.dry_run}")
         logger.info("")
 

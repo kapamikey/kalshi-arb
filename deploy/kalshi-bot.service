@@ -14,7 +14,8 @@ ExecStart=/usr/bin/python3 scripts/run_bot.py \
     --interval 300 \
     --min-edge 2 \
     --max-contracts 5 \
-    --profit-target-cents 8 \
+    --take-profit-pct 0.20 \
+    --stop-loss-pct 0.50 \
     --daily-loss-limit-pct 0.20 \
     --max-exposure-pct 0.50 \
     --per-trade-pct 0.10

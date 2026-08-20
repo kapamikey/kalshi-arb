@@ -30,7 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.api.client import KalshiClient
-from src.utils import ledger
+from src.utils import ledger, portfolio_log
 
 
 def _f(v) -> float:
@@ -55,7 +55,21 @@ def build_report(client) -> dict:
         for p in pos if _f(p.get("position_fp")) != 0
     ]
 
-    led = ledger.summary()  # reliable P/L for bot-placed, held-to-settlement trades
+    # Count how many ledger rows are REAL (live) vs pretend (dry-run). The bot
+    # logs every dry-run cycle, so the raw ledger is almost all pretend — showing
+    # its P/L as if real is misleading.
+    live_rows = 0
+    ledger_path = Path(__file__).resolve().parent.parent / "data" / "trades.jsonl"
+    if ledger_path.exists():
+        for line in ledger_path.read_text().splitlines():
+            try:
+                if json.loads(line).get("dry_run") is False:
+                    live_rows += 1
+            except (ValueError, TypeError):
+                pass
+
+    led = ledger.summary() if live_rows else None
+    growth = portfolio_log.growth_summary()
 
     return {
         "as_of": datetime.now(timezone.utc).isoformat(),
@@ -64,7 +78,9 @@ def build_report(client) -> dict:
         "account_value": cash + port_value,
         "open_exposure": sum(p["exposure"] for p in open_positions),
         "open_positions": open_positions,
-        "bot_ledger": led,
+        "live_bot_trades": live_rows,
+        "bot_ledger": led,  # None until the bot has placed at least one real trade
+        "growth": growth,  # None until at least one scan cycle has run
     }
 
 
@@ -72,14 +88,17 @@ def print_report(r: dict):
     def money(x):
         return f"+${x:,.2f}" if x >= 0 else f"-${abs(x):,.2f}"
 
-    led = r["bot_ledger"]
-    bot_pnl = led.get("realized_pnl_cents", 0) / 100.0
-
     print("=" * 54)
     print(f"  KALSHI ACCOUNT  ·  {r['as_of'][:16].replace('T', ' ')} UTC")
     print("=" * 54)
     print(f"  Account value : ${r['account_value']:,.2f}  "
           f"(cash ${r['cash']:,.2f} + positions ${r['portfolio_value']:,.2f})")
+    growth = r.get("growth")
+    if growth:
+        arrow = "up" if growth["delta"] >= 0 else "down"
+        since = growth["first_ts"][:10]
+        print(f"  Growth        : {money(growth['delta'])} ({growth['pct']:+.1f}%) "
+              f"{arrow} since {since}  [{growth['n_snapshots']} snapshots]")
     print(f"  Open exposure : ${r['open_exposure']:,.2f} across "
           f"{len(r['open_positions'])} position(s)")
     if r["open_positions"]:
@@ -87,10 +106,14 @@ def print_report(r: dict):
             print(f"    {p['ticker'][:42]:42s} {p['contracts']:.0f}x  "
                   f"${p['exposure']:.2f} at risk")
     print("-" * 54)
-    print("  Bot ledger (bot-placed trades held to settlement):")
-    print(f"    {led.get('won',0)}W / {led.get('lost',0)}L "
-          f"({led.get('win_rate',0):.0%} win rate), "
-          f"{led.get('open',0)} open, realized {money(bot_pnl)}")
+    led = r["bot_ledger"]
+    if led is None:
+        print("  Bot: running in PRETEND mode — 0 real trades placed.")
+        print("  (No bot P/L yet. It only logs what it *would* bet.)")
+    else:
+        bot_pnl = led.get("realized_pnl_cents", 0) / 100.0
+        print(f"  Bot (real trades only): {led.get('won',0)}W / {led.get('lost',0)}L "
+              f"({led.get('win_rate',0):.0%}), realized {money(bot_pnl)}")
     print("-" * 54)
     print("  All-time realized P/L: see Kalshi's own P/L page.")
     print("  (Not reconstructed here — settlement cost fields report gross")

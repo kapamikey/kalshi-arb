@@ -99,7 +99,8 @@ exposure cap all remain active.
 | Per-trade spend cap  | 10% of balance | `--per-trade-pct` |
 | Max open exposure    | 50% of balance | `--max-exposure-pct` |
 | Daily loss circuit-breaker | 20% of start-of-day balance | `--daily-loss-limit-pct` |
-| Take-profit target   | entry + 8¢ | `--profit-target-cents` |
+| Take-profit target   | entry × 1.20 (20% gross return) | `--take-profit-pct` |
+| Stop-loss            | entry × 0.50 (50% below entry) | `--stop-loss-pct` |
 
 ## Monitoring wins/losses
 
