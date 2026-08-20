@@ -204,6 +204,8 @@ class SmartMoneyBot:
         internal_min_spread_cents: int = 4,
         internal_min_open_interest: float = 100.0,
         whale_only: bool = True,
+        max_hours_to_close: float | None = 12.0,
+        min_market_volume: float = 1_000_000.0,
     ):
         self.client = kalshi_client
         self.min_trader_pnl = min_trader_pnl
@@ -224,6 +226,8 @@ class SmartMoneyBot:
         self.internal_min_spread_cents = internal_min_spread_cents
         self.internal_min_open_interest = internal_min_open_interest
         self.whale_only = whale_only
+        self.max_hours_to_close = max_hours_to_close
+        self.min_market_volume = min_market_volume
         self._kalshi_market_cache: dict[str, list[dict]] = {}
         self._kalshi_markets_by_ticker: dict[str, dict] = {}
         self._sports_series: set[str] = set()
@@ -401,9 +405,26 @@ class SmartMoneyBot:
         # iterate the whole universe (internal mispricing).
         self._kalshi_market_cache = {}
         self._kalshi_markets_by_ticker = {}
+        now = datetime.now(timezone.utc)
+        skipped_far, skipped_thin = 0, 0
         for m in all_markets:
             ticker = m.get("ticker")
             if not ticker or "KXMV" in ticker:  # skip multivariate combos
+                continue
+            if self.max_hours_to_close is not None:
+                close_time = m.get("close_time")
+                if close_time:
+                    try:
+                        close_dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+                        hours_out = (close_dt - now).total_seconds() / 3600
+                        if hours_out > self.max_hours_to_close:
+                            skipped_far += 1
+                            continue
+                    except ValueError:
+                        pass
+            volume = float(m.get("volume_fp", 0) or 0)
+            if volume < self.min_market_volume:
+                skipped_thin += 1
                 continue
             self._kalshi_markets_by_ticker[ticker] = m
             title = " ".join(filter(None, [
@@ -415,7 +436,9 @@ class SmartMoneyBot:
 
         self._kalshi_cache_time = time.time()
         logger.info(
-            f"Cached {len(self._kalshi_markets_by_ticker)} sports markets"
+            f"Cached {len(self._kalshi_markets_by_ticker)} sports markets "
+            f"(skipped {skipped_far} closing >{self.max_hours_to_close}h out, "
+            f"{skipped_thin} under ${self.min_market_volume:,.0f} volume)"
         )
 
     def find_matching_kalshi_markets(self, signal: SmartMoneySignal) -> list[dict]:
