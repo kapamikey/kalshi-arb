@@ -30,6 +30,8 @@ def main():
     parser.add_argument("--allow-internal", action="store_true", help="Also use the internal spread scan (OFF by default: it treats wide spreads as edge, produced 93%% of picks at a 15%% win rate)")
     parser.add_argument("--max-hours-to-close", type=float, default=12.0, help="Skip markets closing more than this many hours out (default: 12; pass a negative number to disable)")
     parser.add_argument("--min-market-volume", type=float, default=1_000_000.0, help="Skip markets with total volume under this many dollars (default: 1000000)")
+    parser.add_argument("--paper", action="store_true", help="Paper trading: simulate against a separate fake bankroll (data/paper_trades.jsonl). Always simulated — ignores --live.")
+    parser.add_argument("--paper-balance", type=float, default=1000.0, help="Starting paper bankroll in dollars (default: 1000)")
     parser.add_argument("--live", action="store_true", help="Enable live trading (default: dry run)")
     parser.add_argument("--once", action="store_true", help="Run one scan and exit")
     args = parser.parse_args()
@@ -55,6 +57,8 @@ def main():
         max_trades_per_cycle=args.max_trades_per_cycle,
         max_hours_to_close=None if args.max_hours_to_close < 0 else args.max_hours_to_close,
         min_market_volume=args.min_market_volume,
+        paper_trading=args.paper,
+        paper_start_cents=int(round(args.paper_balance * 100)),
     )
 
     if args.once:

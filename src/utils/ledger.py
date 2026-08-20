@@ -18,6 +18,15 @@ logger = logging.getLogger(__name__)
 
 LEDGER_PATH = Path("data/trades.jsonl")
 
+
+def set_ledger_path(path: Path) -> Path:
+    """Swap the active ledger file (used to route paper-trading runs to their
+    own file). Returns the previous path so callers can restore it."""
+    global LEDGER_PATH
+    prev = LEDGER_PATH
+    LEDGER_PATH = path
+    return prev
+
 # status values a row can hold
 OPEN = "open"          # buy placed / filled, market not yet settled
 WON = "won"            # market settled in our favor

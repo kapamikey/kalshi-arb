@@ -19,6 +19,9 @@ from src.utils import ledger, portfolio_log
 
 logger = logging.getLogger(__name__)
 
+PAPER_LEDGER_PATH = Path("data/paper_trades.jsonl")
+PAPER_PORTFOLIO_PATH = Path("data/paper_portfolio.jsonl")
+
 
 @dataclass
 class SmartMoneySignal:
@@ -206,6 +209,8 @@ class SmartMoneyBot:
         whale_only: bool = True,
         max_hours_to_close: float | None = 12.0,
         min_market_volume: float = 1_000_000.0,
+        paper_trading: bool = False,
+        paper_start_cents: int = 100_000,
     ):
         self.client = kalshi_client
         self.min_trader_pnl = min_trader_pnl
@@ -214,7 +219,11 @@ class SmartMoneyBot:
         self.max_price_cents = max_price_cents
         self.min_price_cents = min_price_cents
         self.top_n_traders = top_n_traders
-        self.dry_run = dry_run
+        self.paper_trading = paper_trading
+        self.paper_start_cents = paper_start_cents
+        # Paper trading is always simulated — no real order ever gets placed,
+        # regardless of what dry_run was passed in.
+        self.dry_run = True if paper_trading else dry_run
         self.take_profit_pct = take_profit_pct
         self.stop_loss_pct = stop_loss_pct
         self.daily_loss_limit_pct = daily_loss_limit_pct
@@ -239,7 +248,26 @@ class SmartMoneyBot:
         self._current_day: str = ""
 
     def refresh_balance(self):
-        """Fetch current available balance + open-position value from Kalshi."""
+        """Fetch current available balance + open-position value from Kalshi.
+
+        Paper mode never touches the real account — balance is derived purely
+        from the paper ledger: starting bankroll, minus cost tied up in open
+        paper positions, plus realized P/L from paper positions that have
+        closed. No separate state file needed; the ledger is the only source
+        of truth.
+        """
+        if self.paper_trading:
+            rows = ledger.read_all()
+            open_cost = sum(int(r.get("cost_cents", 0) or 0) for r in rows if r.get("status") == ledger.OPEN)
+            realized = sum(int(r.get("realized_pnl_cents", 0) or 0) for r in rows if r.get("status") != ledger.OPEN)
+            self._balance_cents = self.paper_start_cents + realized - open_cost
+            self._portfolio_value_cents = open_cost
+            self._account_value_cents = self._balance_cents + self._portfolio_value_cents
+            logger.info(
+                f"Paper balance: ${self._balance_cents / 100:.2f}  "
+                f"(account value ${self._account_value_cents / 100:.2f})"
+            )
+            return
         try:
             resp = self.client.get_balance()
             # Kalshi returns `balance` in integer cents and `balance_dollars` as a
@@ -737,12 +765,17 @@ class SmartMoneyBot:
                 f"  Take-profit rested: ask {contracts}x {opp.kalshi_ticker} @ {target}c"
             )
 
-    def check_stop_losses(self) -> int:
-        """Exit any open position whose price has fallen stop_loss_pct below
-        entry — checked every cycle, both dry-run (simulated exit against the
-        real market price) and live (cancels the resting take-profit, then
-        sells at the current bid to cut the loss now rather than ride it to
-        settlement).
+    def check_exits(self) -> int:
+        """Exit any open position that has hit its take-profit target or
+        fallen through its stop-loss floor — checked every cycle.
+
+        Live positions already rest a real take-profit sell order and get
+        cut on the bid for stop-loss; this method's job there is just the
+        stop-loss cut. Dry-run/paper positions have no resting order, so both
+        the take-profit and stop-loss checks are simulated here against the
+        live bid — otherwise a dry-run/paper trade could only ever lose
+        (ride to settlement or stop out), never simulate the win a live
+        resting take-profit would have captured.
 
         Runs before settlement finalizes, so this only fires on markets still
         actively trading; check_settlements handles anything already decided.
@@ -781,13 +814,36 @@ class SmartMoneyBot:
             if bid is None:
                 continue
 
+            is_dry = r.get("dry_run", self.dry_run)
+
+            # Take-profit simulation (dry-run/paper only — live positions rest
+            # a real sell order for this instead).
+            if is_dry:
+                target = min(round(entry * (1 + self.take_profit_pct)), 99)
+                target = max(target, entry + 1)
+                if bid >= target:
+                    exit_price = target
+                    pnl = (exit_price - entry) * contracts
+                    ledger.update_trade(r["client_order_id"], {
+                        "status": ledger.CLOSED,
+                        "realized_pnl_cents": pnl,
+                        "settled_ts": ledger._utc_now_iso(),
+                        "exit_reason": "take_profit",
+                        "exit_price_cents": exit_price,
+                    })
+                    triggered += 1
+                    logger.info(
+                        f"TAKE-PROFIT: [DRY RUN] {ticker} exited @ {exit_price}c "
+                        f"(entry {entry}c, +{self.take_profit_pct:.0%} target) {pnl:+d}c"
+                    )
+                    continue
+
             floor = int(entry * (1 - self.stop_loss_pct))
             if bid > floor:
                 continue  # still above the stop — hold
 
             exit_price = max(bid, 1)
             pnl = (exit_price - entry) * contracts
-            is_dry = r.get("dry_run", self.dry_run)
 
             if not is_dry:
                 tp_id = r.get("take_profit_order_id")
@@ -848,7 +904,23 @@ class SmartMoneyBot:
         return deduped
 
     def scan_once(self) -> list[CrossPlatformOpportunity]:
-        """Run one full scan cycle."""
+        """Run one full scan cycle.
+
+        Paper-trading runs are routed to their own ledger/portfolio files for
+        the duration of the cycle so they never mix with the real account's
+        history, then the paths are restored — even if the cycle raises.
+        """
+        if not self.paper_trading:
+            return self._scan_once_impl()
+        prev_ledger = ledger.set_ledger_path(PAPER_LEDGER_PATH)
+        prev_portfolio = portfolio_log.set_portfolio_path(PAPER_PORTFOLIO_PATH)
+        try:
+            return self._scan_once_impl()
+        finally:
+            ledger.set_ledger_path(prev_ledger)
+            portfolio_log.set_portfolio_path(prev_portfolio)
+
+    def _scan_once_impl(self) -> list[CrossPlatformOpportunity]:
         logger.info("=" * 60)
         logger.info("Starting scan cycle")
         logger.info("=" * 60)
@@ -867,13 +939,13 @@ class SmartMoneyBot:
                 f"realized {summ['realized_pnl_cents']:+d}c, {summ['open']} open"
             )
 
-        stopped_out = self.check_stop_losses()
-        if stopped_out:
-            logger.info(f"Stop-loss triggered on {stopped_out} position(s) this cycle")
+        exits = self.check_exits()
+        if exits:
+            logger.info(f"Take-profit/stop-loss triggered on {exits} position(s) this cycle")
 
         # Portfolio-growth tracking — the only metric that matters: is the
         # account value going up over time. Recorded every cycle, unconditionally.
-        portfolio_log.record_snapshot(self._account_value_cents / 100)
+        portfolio_log.record_snapshot(self._account_value_cents / 100, paper=self.paper_trading)
 
         # Whale feed health — a silently-expired Bullpen token is what made the
         # bot spend 133 cycles on internal spread-traps with no big money behind
@@ -922,6 +994,7 @@ class SmartMoneyBot:
         exposure_cents = self._current_exposure_cents() if not self.dry_run else 0
         max_exposure = int(self._balance_cents * self.max_exposure_pct)
         placed = 0
+        already_open_tickers = {r.get("ticker") for r in ledger.open_trades()}
 
         for opp in opportunities:
             if placed >= self.max_trades_per_cycle:
@@ -930,6 +1003,9 @@ class SmartMoneyBot:
                     f"stopping execution for this scan"
                 )
                 break
+            if opp.kalshi_ticker in already_open_tickers:
+                continue  # already hold this position — a persisting whale
+                          # signal shouldn't re-buy it every cycle
             if opp.edge_cents < self.min_edge_cents:
                 continue
             if opp.kalshi_yes_ask is None:
@@ -973,6 +1049,7 @@ class SmartMoneyBot:
                 "contracts": contracts,
                 "cost_cents": cost_cents,
                 "dry_run": self.dry_run,
+                "paper": self.paper_trading,
             })
 
             # Accounting (both modes).
@@ -1000,6 +1077,8 @@ class SmartMoneyBot:
         logger.info(f"  Take-profit: +{self.take_profit_pct:.0%} gross | Stop-loss: -{self.stop_loss_pct:.0%}")
         logger.info(f"  Whale-only: {self.whale_only}")
         logger.info(f"  Dry run: {self.dry_run}")
+        if self.paper_trading:
+            logger.info(f"  Paper trading: ${self.paper_start_cents / 100:.2f} simulated bankroll")
         logger.info("")
 
         while True:

@@ -18,18 +18,27 @@ logger = logging.getLogger(__name__)
 PORTFOLIO_LOG = Path("data/portfolio.jsonl")
 
 
+def set_portfolio_path(path: Path) -> Path:
+    """Swap the active portfolio-log file (used to route paper-trading runs to
+    their own file). Returns the previous path so callers can restore it."""
+    global PORTFOLIO_LOG
+    prev = PORTFOLIO_LOG
+    PORTFOLIO_LOG = path
+    return prev
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def record_snapshot(account_value_dollars: float) -> None:
+def record_snapshot(account_value_dollars: float, paper: bool = False) -> None:
     """Append one {ts, account_value} row. Cheap — call every scan cycle."""
     PORTFOLIO_LOG.parent.mkdir(parents=True, exist_ok=True)
     ts = _utc_now_iso()
     value = round(account_value_dollars, 4)
     with PORTFOLIO_LOG.open("a") as f:
         f.write(json.dumps({"ts": ts, "account_value": value}) + "\n")
-    supabase_sync.insert_portfolio_snapshot(ts, value)
+    supabase_sync.insert_portfolio_snapshot(ts, value, paper=paper)
 
 
 def read_all() -> list[dict]:

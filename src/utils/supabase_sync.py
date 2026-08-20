@@ -45,7 +45,7 @@ def upsert_trade(row: dict) -> None:
         logger.warning("Supabase trade sync failed for %s: %s", row.get("client_order_id"), e)
 
 
-def insert_portfolio_snapshot(ts: str, account_value: float) -> None:
+def insert_portfolio_snapshot(ts: str, account_value: float, paper: bool = False) -> None:
     client = _get_client()
     if client is None:
         return
@@ -53,6 +53,7 @@ def insert_portfolio_snapshot(ts: str, account_value: float) -> None:
         client.table("portfolio_snapshots").insert({
             "ts": ts,
             "account_value": account_value,
+            "paper": paper,
         }).execute()
     except Exception as e:
         logger.warning("Supabase portfolio snapshot sync failed: %s", e)
