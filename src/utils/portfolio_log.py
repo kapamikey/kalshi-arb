@@ -11,6 +11,8 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.utils import supabase_sync
+
 logger = logging.getLogger(__name__)
 
 PORTFOLIO_LOG = Path("data/portfolio.jsonl")
@@ -23,11 +25,11 @@ def _utc_now_iso() -> str:
 def record_snapshot(account_value_dollars: float) -> None:
     """Append one {ts, account_value} row. Cheap — call every scan cycle."""
     PORTFOLIO_LOG.parent.mkdir(parents=True, exist_ok=True)
+    ts = _utc_now_iso()
+    value = round(account_value_dollars, 4)
     with PORTFOLIO_LOG.open("a") as f:
-        f.write(json.dumps({
-            "ts": _utc_now_iso(),
-            "account_value": round(account_value_dollars, 4),
-        }) + "\n")
+        f.write(json.dumps({"ts": ts, "account_value": value}) + "\n")
+    supabase_sync.insert_portfolio_snapshot(ts, value)
 
 
 def read_all() -> list[dict]:

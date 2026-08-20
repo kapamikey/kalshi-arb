@@ -12,6 +12,8 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.utils import supabase_sync
+
 logger = logging.getLogger(__name__)
 
 LEDGER_PATH = Path("data/trades.jsonl")
@@ -47,6 +49,7 @@ def record_trade(row: dict) -> dict:
     }
     with LEDGER_PATH.open("a") as f:
         f.write(json.dumps(row) + "\n")
+    supabase_sync.upsert_trade(row)
     return row
 
 
@@ -80,12 +83,15 @@ def update_trade(client_order_id: str, updates: dict) -> bool:
     """Patch the row identified by ``client_order_id``. Returns True if found."""
     rows = read_all()
     found = False
+    updated_row = None
     for r in rows:
         if r.get("client_order_id") == client_order_id:
             r.update(updates)
             found = True
+            updated_row = r
     if found:
         _rewrite(rows)
+        supabase_sync.upsert_trade(updated_row)
     return found
 
 

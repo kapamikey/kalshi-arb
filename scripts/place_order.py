@@ -28,14 +28,21 @@ from src.api.client import KalshiClient
 def main():
     p = argparse.ArgumentParser(description="Place one order on Kalshi (buy YES)")
     p.add_argument("--ticker", required=True, help="Market ticker, e.g. KXWTA-26USO-PEG")
-    p.add_argument("--price", type=int, required=True,
-                   help="Limit price in cents (1-99), e.g. 55 = pay up to 55c")
+    p.add_argument("--side", default="yes", choices=["yes"],
+                   help="Only 'yes' is supported (default). To bet against an "
+                        "outcome, find that outcome's own Kalshi ticker and buy "
+                        "YES on it instead — each side of a matchup is its own market.")
+    p.add_argument("--price", type=float, required=True,
+                   help="Limit price in cents (e.g. 55) or dollars (e.g. 0.55) — both accepted")
     p.add_argument("--count", type=int, default=1, help="Contracts (default: 1)")
     p.add_argument("--live", action="store_true", help="Actually send the order")
     args = p.parse_args()
 
     # This helper only BUYS YES (side=bid). To bet on the other outcome, buy YES
     # on that outcome's own market ticker — each side of a game is its own market.
+
+    # Accept either cents (55) or dollars (0.55) for --price.
+    args.price = round(args.price * 100) if args.price < 1 else round(args.price)
 
     if not (1 <= args.price <= 99):
         p.error("--price must be between 1 and 99 cents")
