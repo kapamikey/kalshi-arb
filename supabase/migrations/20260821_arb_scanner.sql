@@ -109,7 +109,11 @@ create index if not exists paper_positions_event_idx
   on public.paper_positions (event_ticker);
 
 -- Convenience view: paper book performance at a glance.
-create or replace view public.paper_performance as
+-- security_invoker is required, not cosmetic. Without it the view executes as
+-- its owner and reads paper_positions with RLS bypassed, so enabling RLS on the
+-- base table below would NOT stop anon from reading the ledger through here.
+create or replace view public.paper_performance
+  with (security_invoker = on) as
 select
   count(*)                                              as positions,
   count(*) filter (where status = 'open')               as open_positions,
@@ -119,3 +123,13 @@ select
   coalesce(sum(realized_pnl_cents) filter (where status = 'settled'), 0) as realized_pnl_cents,
   coalesce(sum(fee_cents), 0)                           as fees_paid_cents
 from public.paper_positions;
+
+-- Every table in the public schema is exposed through PostgREST to the anon
+-- role, and the anon key is public by design. RLS with no policies revokes anon
+-- access entirely; the Edge Function uses the service role key, which bypasses
+-- RLS, so collection is unaffected. Add explicit read policies later if a
+-- dashboard needs them.
+alter table public.scan_runs         enable row level security;
+alter table public.market_snapshots  enable row level security;
+alter table public.arb_opportunities enable row level security;
+alter table public.paper_positions   enable row level security;

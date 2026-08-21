@@ -23,6 +23,8 @@ export interface KalshiMarket {
   open_interest: number | null;
   liquidity: number | null;
   close_time: string | null;
+  /** "" while trading; "yes" / "no" once settled. The authoritative outcome. */
+  result?: string;
 }
 
 export interface KalshiEvent {
@@ -93,6 +95,43 @@ export async function fetchOpenEvents(opts: {
   }
 
   return events;
+}
+
+/**
+ * Look markets up by ticker, regardless of status.
+ *
+ * Needed for settlement: `fetchOpenEvents` filters to status=open, so a market
+ * that has resolved is simply absent from it. Inferring "gone from the open
+ * listing" as "settled NO" would book a total loss on every basket that ever
+ * settles. This asks for the specific tickers and reads the `result` field.
+ */
+export async function fetchMarketsByTickers(tickers: string[]): Promise<KalshiMarket[]> {
+  const out: KalshiMarket[] = [];
+  const BATCH = 100;
+
+  for (let i = 0; i < tickers.length; i += BATCH) {
+    const batch = tickers.slice(i, i + BATCH);
+    let cursor = "";
+
+    // A batch can still paginate if the API caps the page below our batch size.
+    for (let page = 0; page < 5; page++) {
+      const params: Record<string, string> = {
+        tickers: batch.join(","),
+        limit: String(BATCH),
+      };
+      if (cursor) params.cursor = cursor;
+
+      const body = await getJson<{ markets?: KalshiMarket[]; cursor?: string }>(
+        "/markets",
+        params,
+      );
+      out.push(...(body.markets ?? []));
+      if (!body.cursor || body.cursor === cursor) break;
+      cursor = body.cursor;
+    }
+  }
+
+  return out;
 }
 
 /**

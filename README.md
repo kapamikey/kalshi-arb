@@ -66,14 +66,17 @@ being measured.
 ## Layout
 
 ```
-supabase/functions/_shared/fees.ts    Kalshi fee curve (integer cents)
-supabase/functions/_shared/arb.ts     Detection: overround / underround
-supabase/functions/_shared/paper.ts   Paper ledger + settlement
-supabase/functions/_shared/kalshi.ts  Read-only market data client
-supabase/functions/scan/index.ts      Scheduled entrypoint
-supabase/migrations/                  Schema + cron schedule
-tests/arb.test.ts                     Offline tests for the math
+supabase/functions/scan/index.ts   Scheduled entrypoint
+supabase/functions/scan/arb.ts     Detection: overround / underround
+supabase/functions/scan/fees.ts    Kalshi fee curve (integer cents)
+supabase/functions/scan/kalshi.ts  Read-only market data client
+supabase/functions/scan/paper.ts   Paper ledger + settlement
+supabase/migrations/               Schema + cron schedule
+tests/arb.test.ts                  Offline tests for the math
 ```
+
+The `supabase/functions/<name>/` nesting is required by the Supabase CLI and is
+as flat as this can get while staying deployable.
 
 ## Tests
 

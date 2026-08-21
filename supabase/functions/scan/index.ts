@@ -13,9 +13,9 @@
  */
 
 import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2";
-import { fetchOpenEvents, isSportsEvent, type KalshiEvent } from "../_shared/kalshi.ts";
-import { DEFAULT_SCAN_CONFIG, scanEvent, type ArbOpportunity, type ScanConfig } from "../_shared/arb.ts";
-import { clientKey, settlePosition, toPaperPosition } from "../_shared/paper.ts";
+import { fetchMarketsByTickers, fetchOpenEvents, isSportsEvent, type KalshiEvent } from "./kalshi.ts";
+import { DEFAULT_SCAN_CONFIG, scanEvent, type ArbOpportunity, type ScanConfig } from "./arb.ts";
+import { clientKey, settlePosition, toPaperPosition } from "./paper.ts";
 
 const PAPER_STARTING_BANKROLL_CENTS = 100_000; // $1,000, matching existing paper rows
 
@@ -69,15 +69,13 @@ async function insertAll(db: SupabaseClient, table: string, rows: unknown[], siz
 /**
  * Settle any open paper position whose markets have all resolved.
  *
- * We look the settlement up from the freshly-fetched event set. A market that
- * has fallen out of the "open" listing is finalised; if we can't see its result
- * we leave the position open rather than guessing.
+ * Settlement is looked up by ticker rather than inferred from the open-events
+ * listing. Absence from that listing is NOT evidence of a NO result — settled
+ * markets are filtered out of it by definition — so treating "missing" as
+ * "lost" would book a full loss on every basket that ever settles. A position
+ * is only closed once every leg reports an explicit yes/no result.
  */
-async function settleOpenPositions(
-  db: SupabaseClient,
-  events: KalshiEvent[],
-  now: string,
-): Promise<number> {
+async function settleOpenPositions(db: SupabaseClient, now: string): Promise<number> {
   const { data: open, error } = await db
     .from("paper_positions")
     .select("id, legs, cost_cents, fee_cents, event_ticker")
@@ -85,24 +83,24 @@ async function settleOpenPositions(
   if (error) throw new Error(`select paper_positions: ${error.message}`);
   if (!open?.length) return 0;
 
-  // Tickers still quoted somewhere in the open listing are, by definition, not
-  // yet settled.
-  const stillOpen = new Set<string>();
-  const settledYes = new Set<string>();
-  for (const event of events) {
-    for (const m of event.markets ?? []) {
-      if (m.status === "settled" || m.status === "finalized") {
-        if ((m.last_price ?? 0) >= 100) settledYes.add(m.ticker);
-      } else {
-        stillOpen.add(m.ticker);
-      }
-    }
+  const tickers = [
+    ...new Set(open.flatMap((p) => (p.legs as Array<{ ticker: string }>).map((l) => l.ticker))),
+  ];
+  const markets = await fetchMarketsByTickers(tickers);
+
+  const resultByTicker = new Map<string, string>();
+  for (const m of markets) {
+    if (m.result === "yes" || m.result === "no") resultByTicker.set(m.ticker, m.result);
   }
+  const settledYes = new Set(
+    [...resultByTicker].filter(([, r]) => r === "yes").map(([t]) => t),
+  );
 
   let settled = 0;
   for (const pos of open) {
     const legs = pos.legs as Array<{ ticker: string }>;
-    if (legs.some((l) => stillOpen.has(l.ticker))) continue;
+    // Any leg without a definitive result leaves the whole basket open.
+    if (legs.some((l) => !resultByTicker.has(l.ticker))) continue;
 
     const { payout_cents, realized_pnl_cents } = settlePosition(pos, settledYes);
     const { error: upErr } = await db
@@ -194,7 +192,7 @@ async function run(): Promise<Response> {
     }
 
     const opened = await openPaperPositions(db, opportunities, now);
-    await settleOpenPositions(db, events, nowIso);
+    await settleOpenPositions(db, nowIso);
     await writeEquityPoint(db, nowIso);
 
     await db.from("scan_runs").update({

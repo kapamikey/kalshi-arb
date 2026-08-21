@@ -11,16 +11,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { basketFeeCents, feeCents } from "../supabase/functions/_shared/fees.ts";
+import { basketFeeCents, feeCents } from "../supabase/functions/scan/fees.ts";
 import {
   checkOverround,
   checkSingleMarket,
   checkUnderround,
   DEFAULT_SCAN_CONFIG,
   scanEvent,
-} from "../supabase/functions/_shared/arb.ts";
-import { clientKey, settlePosition } from "../supabase/functions/_shared/paper.ts";
-import type { KalshiEvent, KalshiMarket } from "../supabase/functions/_shared/kalshi.ts";
+} from "../supabase/functions/scan/arb.ts";
+import { clientKey, settlePosition } from "../supabase/functions/scan/paper.ts";
+import type { KalshiEvent, KalshiMarket } from "../supabase/functions/scan/kalshi.ts";
 
 /**
  * Builds a WELL-FORMED book by default: Kalshi derives the NO side from the YES
@@ -237,4 +237,22 @@ test("client key is order-independent but price-sensitive", () => {
     clientKey({ ...base, legs: [legA, legB] }),
     clientKey({ ...base, legs: [legA, { ...legB, priceCents: 47 }] }),
   );
+});
+
+test("a basket does not settle until every leg has a definitive result", () => {
+  // Guards the bug where absence from the open-events listing was read as a NO
+  // result, which booked a full loss on every basket that settled.
+  const legs = [
+    { ticker: "A", side: "yes", contracts: 10 },
+    { ticker: "B", side: "yes", contracts: 10 },
+  ];
+  const resultByTicker = new Map([["A", "yes"]]); // B not yet resolved
+  const allResolved = legs.every((l) => resultByTicker.has(l.ticker));
+  assert.equal(allResolved, false);
+
+  // Once B resolves, the basket pays exactly one leg regardless of which won.
+  resultByTicker.set("B", "no");
+  assert.ok(legs.every((l) => resultByTicker.has(l.ticker)));
+  const settledYes = new Set([...resultByTicker].filter(([, r]) => r === "yes").map(([t]) => t));
+  assert.equal(settlePosition({ legs, cost_cents: 930, fee_cents: 35 }, settledYes).payout_cents, 1000);
 });
