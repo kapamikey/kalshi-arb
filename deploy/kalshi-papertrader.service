@@ -1,5 +1,5 @@
 [Unit]
-Description=Kalshi Autonomous Sports Trader
+Description=Kalshi Paper Trader ($1000 simulated bankroll)
 After=network-online.target
 Wants=network-online.target
 
@@ -8,9 +8,13 @@ Type=simple
 User=kalshi
 WorkingDirectory=/home/kalshi/kalshi-arb
 Environment=PATH=/home/kalshi/.bullpen/bin:/home/kalshi/kalshi-arb/.venv/bin:/usr/local/bin:/usr/bin:/bin
-# Continuous loop; --live is intentionally OMITTED here (dry-run by default).
-# After the burn-in period, add --live to ExecStart and `systemctl daemon-reload && restart`.
+# Fully simulated — --paper forces this regardless of --live. Own ledger
+# (data/paper_trades.jsonl, data/paper_portfolio.jsonl), never touches the
+# real account. Independent unit from kalshi-bot.service on purpose so one
+# can be stopped/restarted without affecting the other.
 ExecStart=/home/kalshi/kalshi-arb/.venv/bin/python3 scripts/run_bot.py \
+    --paper \
+    --paper-balance 1000 \
     --interval 300 \
     --min-edge 2 \
     --max-contracts 5 \
@@ -23,8 +27,8 @@ ExecStart=/home/kalshi/kalshi-arb/.venv/bin/python3 scripts/run_bot.py \
     --min-market-volume 1000000
 Restart=on-failure
 RestartSec=30
-StandardOutput=append:/home/kalshi/kalshi-arb/data/logs/service_stdout.log
-StandardError=append:/home/kalshi/kalshi-arb/data/logs/service_stderr.log
+StandardOutput=append:/home/kalshi/kalshi-arb/data/logs/papertrader_stdout.log
+StandardError=append:/home/kalshi/kalshi-arb/data/logs/papertrader_stderr.log
 
 [Install]
 WantedBy=multi-user.target
