@@ -1,23 +1,24 @@
--- Schedules the scanner. Run this AFTER 20260821_arb_scanner.sql and after the
+-- Schedules the scanner. Run AFTER 20260821_arb_scanner.sql and after the
 -- `scan` Edge Function is deployed.
 --
--- Requires the pg_cron and pg_net extensions (both available on Supabase; enable
--- them under Database > Extensions if they aren't already).
---
--- The service role key is read from Vault rather than inlined, so it never
--- appears in the cron job definition, which is world-readable to anyone with
--- database access.
+-- The service role key comes from Vault rather than being inlined, so it never
+-- appears in the cron job definition.
 
 create extension if not exists pg_cron;
 create extension if not exists pg_net;
 
--- One-time secret setup. Replace the placeholder with the project's service role
--- key, run it once, then delete this statement from your local copy.
+-- One-time secret setup. Run it once with the real key, then delete this line
+-- from your local copy:
 --   select vault.create_secret('<SERVICE_ROLE_KEY>', 'kalshi_arb_service_key');
 
--- Every 5 minutes. Kalshi's books on in-play games move faster than that, but
--- 5m is a reasonable balance between snapshot density and Edge Function
--- invocation count. Tighten to '* * * * *' if you want minute bars.
+-- Every 5 minutes.
+--
+-- Be honest about what this cadence can and cannot do: a genuine cross-outcome
+-- arb on a liquid book is closed by other participants in seconds. A 5-minute
+-- poll will almost never *catch* one — what it reliably builds is the quote
+-- history in market_snapshots, which is what tells you whether exploitable
+-- spreads exist at all and at what size. Treat this as measurement first and
+-- opportunity capture second; capture needs a streaming feed, not a cron.
 select cron.schedule(
   'kalshi-arb-scan',
   '*/5 * * * *',
@@ -36,15 +37,15 @@ select cron.schedule(
   $$
 );
 
--- Housekeeping: market_snapshots grows by roughly (sports markets) rows every
--- run. At ~500 sports markets on a 5-minute cadence that is ~144k rows/day, so
--- prune aggressively unless you are deliberately building a long history.
+-- Housekeeping. market_snapshots gains one row per open market per run. Across
+-- all of Kalshi on a 5-minute cadence that is order-of 10^5-10^6 rows/day, so
+-- this prune is not optional. Shorten the interval if storage bites.
 select cron.schedule(
   'kalshi-arb-prune-snapshots',
   '0 4 * * *',
   $$delete from public.market_snapshots where ts < now() - interval '30 days'$$
 );
 
--- To inspect or remove:
+-- Inspect or remove:
 --   select * from cron.job;
 --   select cron.unschedule('kalshi-arb-scan');

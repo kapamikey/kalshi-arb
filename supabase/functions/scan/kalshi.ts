@@ -133,23 +133,3 @@ export async function fetchMarketsByTickers(tickers: string[]): Promise<KalshiMa
 
   return out;
 }
-
-/**
- * Sports series prefixes. Kalshi encodes the sport in the series ticker, and the
- * `category` field is not reliably populated on the events endpoint, so prefix
- * matching is the sturdier filter.
- */
-export const SPORTS_SERIES_PREFIXES = [
-  "KXNFL", "KXNBA", "KXMLB", "KXNHL", "KXWNBA", "KXNCAA", "KXCFB", "KXCBB",
-  "KXEPL", "KXUCL", "KXLALIGA", "KXSERIEA", "KXBUNDESLIGA", "KXLIGUE1",
-  "KXMLS", "KXUEFA", "KXFIFA", "KXCPLMATCH", "KXARGNACB",
-  "KXT20MATCH", "KXTEST", "KXODI",
-  "KXATP", "KXWTA", "KXTENNIS", "KXUFC", "KXBOXING", "KXF1", "KXNASCAR",
-  "KXGOLF", "KXPGA", "KXMASTERS",
-];
-
-export function isSportsEvent(event: KalshiEvent, prefixes = SPORTS_SERIES_PREFIXES): boolean {
-  const series = event.series_ticker ?? "";
-  if (series && prefixes.some((p) => series.startsWith(p))) return true;
-  return (event.category ?? "").toLowerCase() === "sports";
-}
