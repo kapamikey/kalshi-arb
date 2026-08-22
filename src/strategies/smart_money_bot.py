@@ -91,12 +91,22 @@ def check_bullpen_auth() -> tuple[bool, str]:
         return False, f"bullpen CLI unavailable: {e}"
 
     out = result.stdout or ""
+    # Read the "Token:" line specifically. A substring search over the whole
+    # report is not safe: "Keypair: Valid" is printed even when fully logged
+    # out, so `"Valid" in out` reports a healthy feed for a logged-out CLI —
+    # exactly the silent failure this check exists to catch.
     for line in out.splitlines():
         low = line.lower()
-        if "token:" in low and "expired" in low:
-            return False, line.strip()
-    if "Valid" in out or "Ready" in out:
-        return True, "token valid"
+        if "token:" not in low:
+            continue
+        detail = line.split(":", 1)[1].strip() or line.strip()
+        if "expired" in low:
+            return False, f"token expired ({detail})"
+        if "not logged in" in low:
+            return False, "not logged in — run: bullpen login"
+        if "valid" in low:
+            return True, detail
+        return False, f"unrecognized token state: {detail}"
     return False, "could not determine auth state — run: bullpen login"
 
 
@@ -951,21 +961,28 @@ class SmartMoneyBot:
         # bot spend 133 cycles on internal spread-traps with no big money behind
         # any of it. Fail loudly, and say exactly how to fix it. This only gates
         # looking for NEW trades — everything above already ran.
+        # Auth state is advisory, not the gate. The leaderboard/positions
+        # endpoints this bot reads are public — they return real whale data
+        # from a logged-out CLI — so refusing to trade on a bad token would
+        # halt a feed that actually works. What matters is whether signals
+        # arrive; auth is reported only to explain a feed that came up empty.
         auth_ok, auth_detail = check_bullpen_auth()
-        if auth_ok:
-            logger.info(f"Whale feed: OK ({auth_detail})")
-        else:
-            logger.error("=" * 60)
-            logger.error(f"WHALE FEED DOWN: {auth_detail}")
-            logger.error("Fix with:  bullpen login")
-            if self.whale_only:
-                logger.error("whale-only mode: no new signal source this cycle — skipping.")
-            logger.error("=" * 60)
-            if self.whale_only:
-                return []
+        logger.info(
+            f"Whale feed auth: {'OK' if auth_ok else 'NOT LOGGED IN'} ({auth_detail})"
+        )
 
         # 1. Collect opportunities from both signal sources.
         opportunities = self.collect_opportunities()
+
+        if not opportunities and self.whale_only:
+            logger.error("=" * 60)
+            logger.error("WHALE FEED PRODUCED NOTHING this cycle.")
+            if not auth_ok:
+                logger.error(f"Bullpen auth is unhealthy: {auth_detail}")
+                logger.error("Fix with:  bullpen login")
+            else:
+                logger.error("Auth is fine — no market cleared the filters.")
+            logger.error("=" * 60)
 
         # 2. Log results.
         if opportunities:
