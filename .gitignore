@@ -4,6 +4,10 @@ config/kalshi-private-key.pem
 data/snapshots/
 data/logs/
 data/trades.legacy-*.jsonl
+data/trades.jsonl
+data/paper_trades.jsonl
+data/portfolio.jsonl
+data/paper_portfolio.jsonl
 __pycache__/
 *.pyc
 .venv/

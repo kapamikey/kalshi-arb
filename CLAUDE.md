@@ -57,7 +57,9 @@ tail -f data/logs/launchd_stdout.log                                    # monito
 ## Important Notes
 
 - The bot defaults to **dry run mode**. Add `--live` to place real orders.
-- Michael's Kalshi account has a small balance (~$5). Max 1 contract per trade.
-- The balance guard prevents placing orders that exceed available funds.
+- Michael actively trades his real Kalshi account manually (outside this bot), across
+  many sports/markets, so its balance fluctuates independently and can swing widely —
+  don't assume a stale balance figure; check `client.get_balance()` for the current one.
+- The balance guard prevents the *bot's own* orders from exceeding available funds.
 - Multivariate combo markets (tickers containing `KXMV`) are skipped — no standalone liquidity.
 - Bullpen CLI must be logged in (`bullpen login`) and needs PATH set to `~/.bullpen/bin`.
