@@ -12,19 +12,25 @@ Environment=PATH=/home/kalshi/.bullpen/bin:/home/kalshi/kalshi-arb/.venv/bin:/us
 # (data/paper_trades.jsonl, data/paper_portfolio.jsonl), never touches the
 # real account. Independent unit from kalshi-bot.service on purpose so one
 # can be stopped/restarted without affecting the other.
+#
+# Deliberately looser than kalshi-bot.service: with fake money the goal is
+# maximum trade volume/data, not capital preservation. --max-hours-to-close
+# disabled and --min-market-volume dropped so whale signals actually clear
+# the market cache (at 12h/$1M literally 0 sports markets passed).
 ExecStart=/home/kalshi/kalshi-arb/.venv/bin/python3 scripts/run_bot.py \
     --paper \
     --paper-balance 1000 \
     --interval 300 \
     --min-edge 2 \
-    --max-contracts 5 \
+    --max-contracts 20 \
     --take-profit-pct 0.15 \
     --stop-loss-pct 0.50 \
-    --daily-loss-limit-pct 0.20 \
-    --max-exposure-pct 0.30 \
-    --per-trade-pct 0.10 \
-    --max-hours-to-close 12 \
-    --min-market-volume 1000000
+    --daily-loss-limit-pct 1.0 \
+    --max-exposure-pct 1.0 \
+    --per-trade-pct 0.20 \
+    --max-trades-per-cycle 10 \
+    --max-hours-to-close -1 \
+    --min-market-volume 0
 Restart=on-failure
 RestartSec=30
 StandardOutput=append:/home/kalshi/kalshi-arb/data/logs/papertrader_stdout.log

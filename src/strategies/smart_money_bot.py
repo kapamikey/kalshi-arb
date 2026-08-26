@@ -249,6 +249,7 @@ class SmartMoneyBot:
         self.min_market_volume = min_market_volume
         self._kalshi_market_cache: dict[str, list[dict]] = {}
         self._kalshi_markets_by_ticker: dict[str, dict] = {}
+        self._last_signals: list = []
         self._sports_series: set[str] = set()
         self._kalshi_cache_time: float = 0
         self._balance_cents: int = 0
@@ -886,6 +887,7 @@ class SmartMoneyBot:
         opportunities: list[CrossPlatformOpportunity] = []
 
         signals = self.extract_signals()
+        self._last_signals = signals
         for signal in signals:
             for kalshi_market in self.find_matching_kalshi_markets(signal):
                 opp = self.evaluate_opportunity(signal, kalshi_market)
@@ -977,11 +979,24 @@ class SmartMoneyBot:
         if not opportunities and self.whale_only:
             logger.error("=" * 60)
             logger.error("WHALE FEED PRODUCED NOTHING this cycle.")
-            if not auth_ok:
-                logger.error(f"Bullpen auth is unhealthy: {auth_detail}")
-                logger.error("Fix with:  bullpen login")
+            n_cached = len(self._kalshi_markets_by_ticker)
+            if not self._last_signals:
+                if not auth_ok:
+                    logger.error(f"Bullpen auth is unhealthy: {auth_detail}")
+                    logger.error("Fix with:  bullpen login")
+                else:
+                    logger.error("Auth is fine — Bullpen returned 0 whale signals this cycle.")
+            elif n_cached == 0:
+                logger.error(
+                    f"Got {len(self._last_signals)} whale signals, but the Kalshi market cache "
+                    f"is empty — --max-hours-to-close/--min-market-volume filtered out everything. "
+                    "Not an auth problem."
+                )
             else:
-                logger.error("Auth is fine — no market cleared the filters.")
+                logger.error(
+                    f"Got {len(self._last_signals)} whale signals and {n_cached} cached markets, "
+                    "but none matched by keyword/outcome."
+                )
             logger.error("=" * 60)
 
         # 2. Log results.
