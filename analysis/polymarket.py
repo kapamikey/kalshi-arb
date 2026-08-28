@@ -18,6 +18,7 @@ you do not want to re-fetch while iterating on the analysis.
 import json
 import os
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -27,14 +28,30 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 USER_AGENT = "kalshi-arb-research/1.0"
 
 
+class EgressBlocked(RuntimeError):
+    """The network policy refused the host. Retrying will never help."""
+
+
 def _get(url, params, retries=3):
     q = f"{url}?{urllib.parse.urlencode(params)}"
+    host = urllib.parse.urlparse(url).netloc
+
     for attempt in range(retries):
         try:
             req = urllib.request.Request(q, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=30) as r:
                 return json.loads(r.read())
-        except Exception:
+        except urllib.error.URLError as e:
+            # A proxy 403/407 is a policy denial, not a transient failure.
+            # Retrying it burns the backoff budget and buries the real cause
+            # under a urllib traceback, so surface it immediately and plainly.
+            detail = str(getattr(e, "reason", e))
+            if "403" in detail or "407" in detail or "Tunnel connection failed" in detail:
+                raise EgressBlocked(
+                    f"{host} is blocked by the network egress policy ({detail}). "
+                    "Run this where the host is reachable, or fetch the data "
+                    "elsewhere and load the JSON dump instead."
+                ) from None
             if attempt == retries - 1:
                 raise
             time.sleep(2 ** attempt)

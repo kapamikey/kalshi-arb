@@ -9,6 +9,8 @@ python3 analysis/test_edge.py                          # validate the rig (10 te
 python3 analysis/run_study.py --demo --min-trades 100  # synthetic, zero edge
 python3 analysis/run_study.py --demo --skilled         # synthetic, real edge
 python3 analysis/run_study.py --live                   # real Polymarket data
+python3 analysis/run_study.py \
+    --trades-json trades.json --markets-json markets.json   # from a dump
 ```
 
 Stdlib only. No numpy, no pandas.
@@ -92,6 +94,21 @@ exercised. Spots most likely to break are marked `FIELD`.
 That's a parsing problem, not a methodology one: `edge.py` takes plain tuples and
 is validated independently, so run `--live` somewhere with network access and fix
 field names against a real response. Results cache to `analysis/cache/`.
+
+If you can't run this where Polymarket is reachable, fetch the data anywhere else
+and hand over the JSON — no egress needed on the analysis side:
+
+```bash
+curl 'https://data-api.polymarket.com/trades?limit=500' > trades.json
+curl 'https://gamma-api.polymarket.com/markets?closed=true&limit=500' > markets.json
+python3 analysis/run_study.py --trades-json trades.json --markets-json markets.json
+```
+
+The dump path is exercised end to end against synthetic data in the live API's
+JSON shape, so the parser is tested even though the network call isn't. The runner
+reports the parse rate and warns if more than 10% of rows are dropped — silent
+field-name drift is the failure mode that would otherwise produce a confident
+answer from a tenth of the data.
 
 ## What a real result would look like
 

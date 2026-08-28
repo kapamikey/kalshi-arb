@@ -26,7 +26,12 @@ def main():
     ap.add_argument("--min-trades", type=int, default=50,
                     help="minimum rank-window track record (default 50)")
     ap.add_argument("--top-frac", type=float, default=0.10)
+    ap.add_argument("--trades-json", help="trades dump fetched elsewhere")
+    ap.add_argument("--markets-json", help="markets dump fetched elsewhere")
     args = ap.parse_args()
+
+    if args.trades_json and not args.markets_json:
+        ap.error("--trades-json also needs --markets-json for resolutions")
 
     if args.demo:
         from simulate import population
@@ -41,13 +46,37 @@ def main():
             if args.skilled else
             "SYNTHETIC — every wallet has mathematically zero edge"
         )
-    elif args.live:
+    elif args.live or args.trades_json:
+        import json
         import polymarket as pm
-        print("Fetching Polymarket data (cached under analysis/cache/)...")
-        raw_trades = pm.fetch_trades()
-        raw_markets = pm.fetch_resolved_markets()
+
+        if args.trades_json:
+            with open(args.trades_json) as f:
+                raw_trades = json.load(f)
+            with open(args.markets_json) as f:
+                raw_markets = json.load(f)
+        else:
+            print("Fetching Polymarket data (cached under analysis/cache/)...")
+            try:
+                raw_trades = pm.fetch_trades()
+                raw_markets = pm.fetch_resolved_markets()
+            except pm.EgressBlocked as e:
+                sys.exit(
+                    f"\n{e}\n\n"
+                    "To run it from a dump instead:\n"
+                    "  curl 'https://data-api.polymarket.com/trades?limit=500' > trades.json\n"
+                    "  curl 'https://gamma-api.polymarket.com/markets?closed=true&limit=500' > markets.json\n"
+                    "  python3 analysis/run_study.py --trades-json trades.json "
+                    "--markets-json markets.json\n"
+                )
+
         trades = pm.to_trades(raw_trades)
         resolutions = pm.to_resolutions(raw_markets)
+        print(f"Parsed {len(trades):,}/{len(raw_trades):,} trades, "
+              f"{len(resolutions):,} resolved outcomes")
+        if len(raw_trades) and len(trades) / len(raw_trades) < 0.9:
+            print("WARNING: >10% of trades failed to parse — check the FIELD "
+                  "notes in polymarket.py before trusting this run.")
         if not trades:
             sys.exit("No trades parsed. Check the FIELD notes in polymarket.py.")
         stamps = sorted(t[6] for t in trades)
@@ -56,7 +85,7 @@ def main():
             f"LIVE — {len(trades):,} trades, {len(resolutions):,} resolved outcomes"
         )
     else:
-        ap.error("pass --demo or --live")
+        ap.error("pass --demo, --live, or --trades-json/--markets-json")
 
     print(f"\n{label}")
     print(f"Split: rank window < {split} <= eval window\n")
