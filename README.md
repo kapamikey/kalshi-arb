@@ -70,6 +70,7 @@ supabase/functions/scan/kalshi.ts  Read-only market data client
 supabase/functions/scan/paper.ts   Ledger identity + settlement
 supabase/migrations/               Schema + cron schedule
 tests/arb.test.ts                  Offline tests for the math
+web/                               Read-only dashboard (Vite + React)
 ```
 
 `supabase/functions/<name>/` is required by the Supabase CLI.
@@ -95,6 +96,23 @@ Then set the Vault secret and enable the schedule per
 
 `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are injected automatically.
 Optional tuning: `MIN_NET_EDGE_CENTS` (default 1), `CONTRACTS` (default 20).
+
+## Dashboard
+
+A clickable, read-only viewer over scan_runs, paper_positions, and market_snapshots.
+
+It never inserts scanner rows, never talks to Kalshi, and does not ship a service-role token to the browser.
+
+Live: https://kapamikey.github.io/kalshi-arb/
+
+Local server is documented in web/README.md.
+Local: cd web && bun install && bun dev  (http://localhost:5173).
+
+Env: copy web/.env.example. VITE_SUPABASE_URL defaults to the linked project. VITE_SUPABASE_ANON_KEY is the anon/publishable token only.
+If the build omits it, paste on the page (stored in localStorage only).
+
+Apply supabase/migrations/20260830_dashboard_read.sql (`supabase db push`) so anon SELECT policies exist.
+Pages: .github/workflows/dashboard.yml. Put VITE_SUPABASE_ANON_KEY in repo Actions so the live build can fetch without pasting.
 
 ## Reading the results
 
