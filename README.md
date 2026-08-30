@@ -112,7 +112,7 @@ Env: copy web/.env.example. VITE_SUPABASE_URL defaults to the linked project. VI
 If the build omits it, paste on the page (stored in localStorage only).
 
 Apply supabase/migrations/20260830_dashboard_read.sql (`supabase db push`) so anon SELECT policies exist.
-Pages: .github/workflows/dashboard.yml. Put VITE_SUPABASE_ANON_KEY in repo Actions so the live build can fetch without pasting.
+Publish `web/dist` to the `gh-pages` branch. Rebuild: `cd web && VITE_BASE=/kalshi-arb/ bun run build`.
 
 ## Reading the results
 
