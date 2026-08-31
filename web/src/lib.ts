@@ -1,7 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 export const DEFAULT_SUPABASE_URL = "https://axdikbsghdotugnotzof.supabase.co";
-export const STARTING_BANKROLL_CENTS = 100_000;
 export const STALE_AFTER_MS = 10 * 60 * 1000;
 const STORAGE_KEY = "kalshi-arb-dashboard-anon";
 
@@ -69,7 +68,7 @@ export type MarketSnapshot = {
 export type PaperEquity = {
   ts: string;
   account_value: number;
-  source: "portfolio_snapshots" | "paper_positions";
+  source: "portfolio_snapshots";
 };
 
 export type LoadErrorKind = "missing_key" | "rls" | "network" | "other";
@@ -230,15 +229,6 @@ export async function loadDashboard(
   if (!eqRes.error && eqRes.data && eqRes.data.length > 0) {
     const row = eqRes.data[0] as { ts: string; account_value: number };
     equity = { ts: row.ts, account_value: row.account_value, source: "portfolio_snapshots" };
-  } else {
-    const realized = positions
-      .filter((p) => p.status === "settled")
-      .reduce((s, p) => s + (p.realized_pnl_cents ?? 0), 0);
-    equity = {
-      ts: latest?.ts ?? new Date().toISOString(),
-      account_value: (STARTING_BANKROLL_CENTS + realized) / 100,
-      source: "paper_positions",
-    };
   }
 
   let snapshots: MarketSnapshot[] = [];

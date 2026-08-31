@@ -261,9 +261,7 @@ export default function App() {
         </div>
         {data.equity && (
           <p className="muted" style={{ margin: "8px 0 0" }}>
-            {data.equity.source === "portfolio_snapshots"
-              ? `Latest paper portfolio_snapshots · ${fmtNy(data.equity.ts)}`
-              : "Derived from paper_positions (starting $1,000 + realised). Unsettled baskets are not marked to market."}
+            Latest paper portfolio_snapshots · {fmtNy(data.equity.ts)}
           </p>
         )}
       </section>
