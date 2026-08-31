@@ -156,8 +156,7 @@ export function readTradeEnv(get: EnvGetter): TradeEnv {
 
   if (tradingEnabled && (!apiKeyId || !privateKeyPem)) {
     throw new Error(
-      "KALSHI_TRADING_ENABLED is true but KALSHI_API_KEY_ID or KALSHI_PRIVATE_KEY is empty. " +
-        "Put the demo key in Vault (not the repo) or set KALSHI_TRADING_ENABLED=false.",
+      "KALSHI_TRADING_ENABLED=true requires KALSHI_DEMO_KEY_ID and KALSHI_DEMO_PRIVATE_KEY_PEM at runtime (Vault later). Refusing to boot.",
     );
   }
 

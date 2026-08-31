@@ -44,8 +44,8 @@ Set these as **Edge Function secrets** (Vault), not in the repo:
 |---|---|---|
 | `KALSHI_TRADING_ENABLED` | `false` | Must be `true` to place demo orders. |
 | `KALSHI_API_BASE` | `https://external-api.demo.kalshi.co/trade-api/v2` | Allowlisted demo hosts only. Production hosts (`external-api.kalshi.com`, `api.elections.kalshi.com`) **crash on boot before any HTTP**. |
-| `KALSHI_API_KEY_ID` | empty | Demo API Key ID from [demo.kalshi.co](https://demo.kalshi.co/). Alias: `KALSHI_DEMO_KEY_ID`. |
-| `KALSHI_PRIVATE_KEY` | empty | Demo RSA private key PEM. `\n` escapes and base64-of-PEM are accepted. Alias: `KALSHI_DEMO_PRIVATE_KEY_PEM`. |
+| `KALSHI_DEMO_KEY_ID` | empty | Demo API Key ID from [demo.kalshi.co](https://demo.kalshi.co/). |
+| `KALSHI_DEMO_PRIVATE_KEY_PEM` | empty | Demo RSA private key PEM. `\n` escapes and base64-of-PEM are accepted. |
 | `DEMO_EVENT_CAP` | `20` | Max mutually-exclusive open demo events per run. |
 | `MIN_NET_EDGE_CENTS` | `1` | Reused from `arb.ts`. Fee / overround math is not forked. |
 
@@ -58,8 +58,8 @@ Empty keys:
 supabase secrets set KALSHI_TRADING_ENABLED=false
 supabase secrets set KALSHI_API_BASE=https://external-api.demo.kalshi.co/trade-api/v2
 # After Michael puts the demo key in Vault (due Tue 9/1):
-#   supabase secrets set KALSHI_API_KEY_ID=<demo-key-id>
-#   supabase secrets set KALSHI_PRIVATE_KEY="$(cat /path/to/demo.pem)"
+#   supabase secrets set KALSHI_DEMO_KEY_ID=<demo-key-id>
+#   supabase secrets set KALSHI_DEMO_PRIVATE_KEY_PEM="$(cat /path/to/demo.pem)"
 #   supabase secrets set KALSHI_TRADING_ENABLED=true
 ```
 

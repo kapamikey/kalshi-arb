@@ -97,8 +97,8 @@ test("trading disabled starts with empty keys and places zero HTTP", () => {
   const cfg = readTradeEnv(
     env({
       KALSHI_TRADING_ENABLED: "false",
-      KALSHI_API_KEY_ID: "",
-      KALSHI_PRIVATE_KEY: "",
+      KALSHI_DEMO_KEY_ID: "",
+      KALSHI_DEMO_PRIVATE_KEY_PEM: "",
     }),
   );
   assert.equal(cfg.tradingEnabled, false);
@@ -120,22 +120,22 @@ test("trading enabled with empty keys fails clearly before HTTP", () => {
       readTradeEnv(
         env({
           KALSHI_TRADING_ENABLED: "true",
-          KALSHI_API_KEY_ID: "",
-          KALSHI_PRIVATE_KEY: "",
+          KALSHI_DEMO_KEY_ID: "",
+          KALSHI_DEMO_PRIVATE_KEY_PEM: "",
         }),
       ),
-    /KALSHI_API_KEY_ID or KALSHI_PRIVATE_KEY is empty/,
+    /KALSHI_DEMO_KEY_ID and KALSHI_DEMO_PRIVATE_KEY_PEM/,
   );
   assert.throws(
     () =>
       readTradeEnv(
         env({
           KALSHI_TRADING_ENABLED: "true",
-          KALSHI_API_KEY_ID: "abc",
-          KALSHI_PRIVATE_KEY: "",
+          KALSHI_DEMO_KEY_ID: "abc",
+          KALSHI_DEMO_PRIVATE_KEY_PEM: "",
         }),
       ),
-    /empty/,
+    /KALSHI_DEMO_PRIVATE_KEY_PEM/,
   );
   assert.equal(fetches.length, 0);
 });
