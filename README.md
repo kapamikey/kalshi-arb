@@ -1,22 +1,128 @@
 # kalshi-arb
 
-Read-only Kalshi arbitrage scanner with a paper-trading ledger, running as a
-scheduled Supabase Edge Function.
+Kalshi arbitrage scanner (5-minute **public** quotes) plus a **demo paper trader**
+that can place signed orders against Kalshi's demo / testing-cash API.
 
-**No credentials, no signing, no order placement.** Every Kalshi call is public
-market data over GET. There is no code path that can touch a real account.
+The public scanner still has **no credentials, no signing, no order placement**.
+Demo trading is **off by default** (`KALSHI_TRADING_ENABLED=false`) and hard-crashes
+on boot if a production Trade API host is configured.
 
-## What it does
+Viewer: https://kapamikey.github.io/kalshi-arb/
 
-Every 5 minutes:
+## Friday 9/4 cut vs next week
 
-1. Pulls all open Kalshi events with their nested markets.
-2. Snapshots every market book into `market_snapshots` — the data-collection
-   job, which runs whether or not any edge exists.
+**This week (must ship Friday 2026-09-04)**
+
+- Kill-switch demo REST client. Allowlist only:
+  `https://external-api.demo.kalshi.co/trade-api/v2`
+  (alias `https://demo-api.kalshi.co/trade-api/v2`).
+- RSA-PSS SHA256 signer (`timestamp + METHOD + path`, no query string).
+- `demo_orders` table + anon SELECT. 1 contract per leg.
+- `trade` Edge Function on a **30-second** cron against ~20 open mutually-exclusive
+  **demo** events. Detect and execute on demo books. `POST /portfolio/events/orders`
+  with `client_order_id` idempotency and `fill_or_kill` (no GTC).
+- Thin `DEMO PAPER` strip on the existing `web/` dashboard.
+- Testing cash only. No live money.
+
+**Not this week**
+
+- WebSocket `orderbook_delta` / always-on Fly worker
+- Scanning every demo event
+- Human vs Nerd restyle, extra tables/charts
+- Size 20 on the demo trader (`CONTRACTS=20` remains the *scanner* paper book)
+- `demo_fills` / `demo_baskets`
+- Live / production keys. Live money is a later spec, not a flag flip.
+
+## Demo secrets and flags
+
+Never commit PEM files, keys, or `.env`. Never put Kalshi secrets in `web/` or
+GitHub Pages. Pages only gets the Supabase **anon** key.
+
+Set these as **Edge Function secrets** (Vault), not in the repo:
+
+| Secret | Default | Notes |
+|---|---|---|
+| `KALSHI_TRADING_ENABLED` | `false` | Must be `true` to place demo orders. |
+| `KALSHI_API_BASE` | `https://external-api.demo.kalshi.co/trade-api/v2` | Allowlisted demo hosts only. Production hosts (`external-api.kalshi.com`, `api.elections.kalshi.com`) **crash on boot before any HTTP**. |
+| `KALSHI_API_KEY_ID` | empty | Demo API Key ID from [demo.kalshi.co](https://demo.kalshi.co/). |
+| `KALSHI_PRIVATE_KEY` | empty | Demo RSA private key PEM. `\n` escapes and base64-of-PEM are accepted. |
+| `DEMO_EVENT_CAP` | `20` | Max mutually-exclusive open demo events per run. |
+| `MIN_NET_EDGE_CENTS` | `1` | Reused from `arb.ts`. Fee / overround math is not forked. |
+
+Empty keys:
+
+- **Trading disabled** — function starts, writes `Trader OFF`, places **zero** orders, no Kalshi HTTP.
+- **Trading enabled** — boot fails clearly until the demo key is in Vault.
+
+```bash
+supabase secrets set KALSHI_TRADING_ENABLED=false
+supabase secrets set KALSHI_API_BASE=https://external-api.demo.kalshi.co/trade-api/v2
+# After Michael puts the demo key in Vault (due Tue 9/1):
+#   supabase secrets set KALSHI_API_KEY_ID=<demo-key-id>
+#   supabase secrets set KALSHI_PRIVATE_KEY="$(cat /path/to/demo.pem)"
+#   supabase secrets set KALSHI_TRADING_ENABLED=true
+```
+
+`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are injected automatically.
+
+## 30-second cron
+
+The public scanner stays on its 5-minute job (`kalshi-arb-scan`). The trader is a
+**separate** function and schedule.
+
+1. Deploy the function: `supabase functions deploy trade`
+2. Apply schema + schedule: `supabase db push`
+   (`supabase/migrations/20260831_demo_orders.sql` and
+   `20260831_trade_schedule.sql`).
+3. Confirm: `select jobname, schedule from cron.job;`
+   should include `kalshi-arb-trade` at `30 seconds`, timeout 50s (< 55s cap).
+
+The schedule uses the existing Vault secret `kalshi_arb_service_key` (same
+pattern as the scanner). If you need to turn the cron off:
+
+```sql
+select cron.unschedule('kalshi-arb-trade');
+```
+
+Re-enable:
+
+```sql
+select cron.schedule(
+  'kalshi-arb-trade',
+  '30 seconds',
+  $$
+  select net.http_post(
+    url := 'https://axdikbsghdotugnotzof.supabase.co/functions/v1/trade',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'Authorization', 'Bearer ' || (
+        select decrypted_secret from vault.decrypted_secrets
+        where name = 'kalshi_arb_service_key'
+      )
+    ),
+    timeout_milliseconds := 50000
+  );
+  $$
+);
+```
+
+Leave `KALSHI_TRADING_ENABLED=false` until the demo key is in Vault. The cron
+can run in that state; it will not call Kalshi.
+
+## What the 5-minute scanner does
+
+Every 5 minutes (unchanged):
+
+1. Pulls all open Kalshi events with their nested markets (public GET, production market data).
+2. Snapshots every market book into `market_snapshots`.
 3. Runs arb detection per event.
-4. Opens a paper position for each basket clearing the edge threshold.
+4. Opens a **local** paper position for each basket clearing the edge threshold.
 5. Settles positions whose markets have resolved.
 6. Appends an equity point to `portfolio_snapshots` (`paper = true`).
+
+That scanner never authenticates to Kalshi. It is quote history + a simulated
+ledger. The demo trader is a different path: it reads **demo** books and posts
+**demo** orders.
 
 ## The detection logic
 
@@ -46,41 +152,50 @@ Fees use Kalshi's `ceil(0.07 * C * P * (1-P))` curve in integer basis points —
 the float form rounds `feeCents(100, 50)` to 176 instead of 175, and a one-cent
 error is the same size as the edges being measured.
 
+The demo trader **reuses** `arb.ts`. It does not fork fee or overround math.
+It only overrides size to **1 contract per leg**.
+
 ### Honest limits
 
 - **A 5-minute poll will rarely catch a real arb.** Genuine cross-outcome
   mispricings on a liquid book close in seconds. What this reliably produces is
-  the quote history — which is what actually answers "does exploitable spread
-  exist, and at what size". Capture needs a streaming feed, not a cron.
-- **Fill risk is not modelled.** A scanner can't observe whether both legs would
-  fill before the book moves. Locked P&L is an **upper bound**.
-- **Depth is unknown.** Kalshi's markets endpoint returns no level sizes, so
-  basket size is a config constant, not a book-derived number.
-- Every leg assumes **crossing the spread**. Assuming mid fills is the main way
-  paper arb books flatter themselves.
-- Settlement reconciles against *observed* results, so a broken assumption shows
-  up as a real loss rather than silently booking expected profit.
+  the quote history. Capture needs a streaming feed, not a cron — that's next
+  week if Friday holds.
+- **Demo books ≠ live.** Fills on demo do not prove production edges.
+- **Fill risk is not modelled** on the scanner ledger. Locked P&L is an **upper bound**.
+- **Depth is unknown** on the public markets endpoint.
+- Every scanner paper fill assumes **crossing the spread**.
+- Demo orders use `fill_or_kill` at the ask. If a later leg rejects, earlier
+  filled legs are left as-is this week (no cancel-rest orchestration).
 
 ## Layout
 
 ```
-supabase/functions/scan/index.ts   Scheduled entrypoint
-supabase/functions/scan/arb.ts     Fee curve + basket detection
-supabase/functions/scan/kalshi.ts  Read-only market data client
-supabase/functions/scan/paper.ts   Ledger identity + settlement
-supabase/migrations/               Schema + cron schedule
+supabase/functions/scan/index.ts   5-min public scanner (no Kalshi credentials)
+supabase/functions/scan/arb.ts     Fee curve + basket detection (shared)
+supabase/functions/scan/kalshi.ts  Read-only production market data
+supabase/functions/scan/paper.ts   Local paper ledger identity + settlement
+supabase/functions/trade/index.ts  30s demo trader
+supabase/functions/trade/client.ts Demo allowlist + RSA-PSS signer
+supabase/migrations/               Schema + cron schedules
 tests/arb.test.ts                  Offline tests for the math
-web/                               Read-only dashboard (Vite + React)
+tests/demo-client.test.ts          Production-host crash + signer
+web/                               Dashboard (Vite + React) + DEMO PAPER strip
 ```
 
 `supabase/functions/<name>/` is required by the Supabase CLI.
 
 ## Tests
 
-Pure math runs under Node's type stripping — no Deno needed:
+```bash
+bun test tests/arb.test.ts
+bun test tests/demo-client.test.ts
+```
+
+Pure math also runs under Node's type stripping:
 
 ```bash
-node --experimental-strip-types --test tests/arb.test.ts
+bun test tests/arb.test.ts tests/demo-client.test.ts
 ```
 
 ## Deploy
@@ -89,44 +204,104 @@ node --experimental-strip-types --test tests/arb.test.ts
 supabase link --project-ref axdikbsghdotugnotzof
 supabase db push
 supabase functions deploy scan
+supabase functions deploy trade
 ```
 
-Then set the Vault secret and enable the schedule per
-`supabase/migrations/20260821_schedule.sql`.
+Then set Vault secrets (above) and confirm both cron jobs.
 
-`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are injected automatically.
-Optional tuning: `MIN_NET_EDGE_CENTS` (default 1), `CONTRACTS` (default 20).
+Optional scanner tuning: `MIN_NET_EDGE_CENTS` (default 1), `CONTRACTS` (default 20)
+applies to the **scanner paper book only**. The demo trader is hard-capped at 1
+contract per leg this week.
+
+
+## Demo paper trader (Friday cut)
+
+Edge Function `trade`, every 30 seconds, timeout 50s. Detects on **demo books
+only** (allowlisted `https://external-api.demo.kalshi.co/trade-api/v2`, alias
+`https://demo-api.kalshi.co/trade-api/v2`). Caps ~20 open mutually-exclusive
+demo events. Reuses `arb.ts` unchanged. Signed `POST /portfolio/events/orders`
+with `client_order_id` idempotency. IOC/FOK (never GTC); leftover quantity is
+cancelled in the same run. Persists to `demo_orders` (not `paper_positions`).
+
+Production hosts (`external-api.kalshi.com`, `api.elections.kalshi.com`) throw
+**before HTTP**.
+
+### Secrets / flags (runtime env, never the repo)
+
+Set these on the `trade` function (Vault later). Do not put them in `web/`,
+Pages, git, or chat.
+
+| Name | Default | Meaning |
+|---|---|---|
+| `KALSHI_TRADING_ENABLED` | `false` | Master switch. Off → boot, place **zero** orders. |
+| `KALSHI_DEMO_KEY_ID` | (empty) | Demo API key ID from demo.kalshi.co |
+| `KALSHI_DEMO_PRIVATE_KEY_PEM` | (empty) | Demo RSA private key PEM |
+
+`KALSHI_TRADING_ENABLED=true` without both key vars **fails at boot**. Disabled
+without keys is a valid start.
+
+```bash
+supabase secrets set KALSHI_TRADING_ENABLED=false
+# after the demo key exists:
+# supabase secrets set KALSHI_DEMO_KEY_ID=... KALSHI_DEMO_PRIVATE_KEY_PEM="-----BEGIN ..."
+# supabase secrets set KALSHI_TRADING_ENABLED=true
+```
+
+### This week vs next week
+
+**Friday (this cut):** REST demo paper, 30s cron, 1 contract/leg, thin DEMO
+strip on the dashboard. No WebSocket.
+
+**Next week:** WebSocket / streaming capture. A 30-second REST poll will still
+miss most live edges; WS is what makes capture real. Not this PR.
 
 ## Dashboard
 
-A clickable, read-only viewer over scan_runs, paper_positions, and market_snapshots.
+A clickable viewer over scan_runs, paper_positions, market_snapshots, and
+`demo_orders`.
 
-It never inserts scanner rows, never talks to Kalshi, and does not ship a service-role token to the browser.
+It never inserts scanner rows, never talks to Kalshi from the browser, and does
+not ship a service-role token or a Kalshi PEM to Pages.
 
 Live: https://kapamikey.github.io/kalshi-arb/
 
-Local server is documented in web/README.md.
-Local: cd web && bun install && bun dev  (http://localhost:5173).
+The first thing on the page is a `DEMO PAPER` strip: trader status sentence,
+last 3 demo orders, and `Demo books ≠ live. 5-min scanner is still history.`
+Existing health / paper book / snapshots stay below.
 
-Env: copy web/.env.example. VITE_SUPABASE_URL defaults to the linked project. VITE_SUPABASE_ANON_KEY is the anon/publishable token only.
+Local: `cd web && bun install && bun dev` (http://localhost:5173).
+
+Env: copy `web/.env.example`. `VITE_SUPABASE_URL` defaults to the linked project.
+`VITE_SUPABASE_ANON_KEY` is the anon/publishable token only.
 If the build omits it, paste on the page (stored in localStorage only).
 
-Apply supabase/migrations/20260830_dashboard_read.sql (`supabase db push`) so anon SELECT policies exist.
-Publish `web/dist` to the `gh-pages` branch. Rebuild: `cd web && VITE_BASE=/kalshi-arb/ bun run build`.
+Apply `supabase/migrations/20260830_dashboard_read.sql` and
+`20260831_demo_orders.sql` (`supabase db push`) so anon SELECT policies exist.
+Publish `web/dist` to the `gh-pages` branch. Rebuild:
+`cd web && VITE_BASE=/kalshi-arb/ bun run build`.
 
 ## Reading the results
 
 ```sql
--- Is it alive?
+-- Is the scanner alive?
 select ts, ok, events, markets, opportunities, positions_opened, error
 from scan_runs order by ts desc limit 20;
 
--- Paper book
+-- Demo blotter
+select ts, status, ticker, side, event_ticker, kind, kalshi_order_id, reject_reason
+from demo_orders
+where basket_id <> '__trader__'
+order by ts desc
+limit 20;
+
+-- Trader sentence
+select status, event_ticker, kind, reject_reason, ts
+from demo_orders
+where client_order_id = 'trader-status';
+
+-- Paper book (scanner, not demo fills)
 select status, count(*), sum(cost_cents), sum(locked_pnl_cents), sum(realized_pnl_cents)
 from paper_positions group by status;
-
--- Sports only — a query-time filter, not a collection-time one
-select * from market_snapshots where series_ticker like 'KXNFL%' order by ts desc;
 ```
 
 An empty `paper_positions` with healthy `scan_runs` is a **real result**, not a

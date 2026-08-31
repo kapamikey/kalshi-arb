@@ -73,6 +73,22 @@ export type PaperEquity = {
 
 export type LoadErrorKind = "missing_key" | "rls" | "network" | "other";
 
+export const TRADER_STATUS_BASKET = "__trader__";
+
+export type DemoOrder = {
+  id: number;
+  basket_id: string;
+  ticker: string;
+  side: string;
+  status: string;
+  kalshi_order_id: string | null;
+  reject_reason: string | null;
+  ts: string;
+  event_ticker: string | null;
+  kind: string | null;
+  client_order_id: string | null;
+};
+
 export type DashboardData = {
   runs: ScanRun[];
   latest: ScanRun | null;
@@ -82,6 +98,8 @@ export type DashboardData = {
   snapshots: MarketSnapshot[];
   equity: PaperEquity | null;
   snapshotCount: number | null;
+  demoOrders: DemoOrder[];
+  traderStatus: DemoOrder | null;
 };
 
 export function envAnonKey(): string {
@@ -188,6 +206,40 @@ function sanitizeSearch(q: string): string {
   return q.replace(/[,()%.]/g, " ").trim().slice(0, 64);
 }
 
+
+export function traderSentence(row: DemoOrder | null): string {
+  if (!row || row.status === "off") return "Trader OFF";
+  if (row.status === "watching") return "Watching demo. No edge.";
+  if (row.status === "submitted" || row.status === "filled" || row.status === "cancelled") {
+    const kind = row.kind || "basket";
+    const event = row.event_ticker || "event";
+    return `Submitted ${kind} on ${event}`;
+  }
+  if (row.status === "rejected") {
+    return `Demo rejected: ${row.reject_reason || "unknown"}`;
+  }
+  if (row.status === "no_edge") return "Watching demo. No edge.";
+  return "Trader OFF";
+}
+
+export function demoOrderSentence(row: DemoOrder, now = Date.now()): string {
+  const when = `${fmtNy(row.ts)} · ${ago(row.ts, now)}`;
+  const side = row.side === "no" ? "NO" : "YES";
+  if (row.status === "rejected") {
+    const reason = row.reject_reason ? ` (${row.reject_reason})` : "";
+    return `${when}: tried ${side} ${row.ticker} — rejected${reason}`;
+  }
+  if (row.status === "filled") {
+    const id = row.kalshi_order_id ? ` ${row.kalshi_order_id}` : "";
+    return `${when}: buy ${side} ${row.ticker} — filled${id}`;
+  }
+  if (row.status === "submitted") {
+    const id = row.kalshi_order_id ? ` ${row.kalshi_order_id}` : "";
+    return `${when}: buy ${side} ${row.ticker} — submitted${id}`;
+  }
+  return `${when}: ${side} ${row.ticker} — ${row.status}`;
+}
+
 export async function loadDashboard(
   db: SupabaseClient,
   opts: { search: string; kxnfl: boolean },
@@ -258,5 +310,29 @@ export async function loadDashboard(
     snapshotCount = snapRes.count ?? snapshots.length;
   }
 
-  return { runs, latest, lastOk, stale, positions, snapshots, equity, snapshotCount };
+  const DEMO_COLS =
+    "id, basket_id, ticker, side, status, kalshi_order_id, reject_reason, ts, event_ticker, kind, client_order_id";
+
+  let demoOrders: DemoOrder[] = [];
+  let traderStatus: DemoOrder | null = null;
+  const statusRes = await db
+    .from("demo_orders")
+    .select(DEMO_COLS)
+    .eq("basket_id", TRADER_STATUS_BASKET)
+    .order("ts", { ascending: false })
+    .limit(1);
+  if (!statusRes.error) {
+    traderStatus = ((statusRes.data ?? [])[0] as DemoOrder | undefined) ?? null;
+  }
+  const demoRes = await db
+    .from("demo_orders")
+    .select(DEMO_COLS)
+    .neq("basket_id", TRADER_STATUS_BASKET)
+    .order("ts", { ascending: false })
+    .limit(3);
+  if (!demoRes.error) {
+    demoOrders = (demoRes.data ?? []) as DemoOrder[];
+  }
+
+  return { runs, latest, lastOk, stale, positions, snapshots, equity, snapshotCount, demoOrders, traderStatus };
 }

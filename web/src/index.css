@@ -110,3 +110,16 @@ tr.selected td { background: #13233a; }
 
 .key-form { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .key-form input { flex: 1; min-width: 260px; }
+
+.demo-strip {
+  background: var(--stale-bg);
+  border: 1px solid #6e5420;
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.demo-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.pill.demo { background: #3d2a08; color: #f0c674; }
+.demo-status { margin: 0; font-size: 15px; font-weight: 600; }
+.demo-orders { margin: 10px 0 0; padding-left: 18px; color: var(--text); }
+.demo-orders li { margin: 3px 0; }
+.demo-honest { margin: 10px 0 0; color: var(--muted); font-size: 13px; }

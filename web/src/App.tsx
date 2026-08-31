@@ -5,6 +5,7 @@ import {
   asLegs,
   classifyError,
   clearStoredAnonKey,
+  demoOrderSentence,
   dollars,
   dollarsFromCents,
   envAnonKey,
@@ -13,6 +14,7 @@ import {
   loadDashboard,
   makeClient,
   saveAnonKey,
+  traderSentence,
   type DashboardData,
   type LoadErrorKind,
   type PaperPosition,
@@ -29,6 +31,8 @@ const emptyData: DashboardData = {
   snapshots: [],
   equity: null,
   snapshotCount: null,
+  demoOrders: [],
+  traderStatus: null,
 };
 
 function pnlClass(cents: number | null | undefined): string {
@@ -132,11 +136,28 @@ export default function App() {
 
   return (
     <div className="app">
+      <section className="demo-strip">
+        <div className="demo-head">
+          <span className="pill demo">DEMO PAPER</span>
+          <p className="demo-status">{traderSentence(data.traderStatus)}</p>
+        </div>
+        <ul className="demo-orders">
+          {data.demoOrders.length === 0 ? (
+            <li className="muted">No demo orders yet.</li>
+          ) : (
+            data.demoOrders.map((row) => (
+              <li key={row.id}>{demoOrderSentence(row, now)}</li>
+            ))
+          )}
+        </ul>
+        <p className="demo-honest">Demo books ≠ live. 5-min scanner is still history.</p>
+      </section>
+
       <header className="top">
         <div>
           <h1>kalshi-arb</h1>
           <p className="sub">
-            Read-only paper book for the 5-minute scanner. No orders, no Kalshi credentials,
+            Read-only paper book for the 5-minute scanner. No Kalshi credentials,
             no service role in the browser.
           </p>
         </div>
