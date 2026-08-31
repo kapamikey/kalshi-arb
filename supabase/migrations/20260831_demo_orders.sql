@@ -1,8 +1,9 @@
 -- Demo paper-trading blotter. One table this week.
 --
--- Sentinel rows (basket_id = 'trader', ticker = '-') hold Trader OFF /
--- Watching demo. No edge. Real orders never use that basket id.
--- Do not create demo_fills / demo_baskets. Do not write these into paper_positions.
+-- Sentinel row (basket_id = '__trader__', client_order_id = 'trader-status')
+-- holds the latest trader sentence for the dashboard. Real orders never use
+-- that basket id. Do not create demo_fills / demo_baskets. Do not write
+-- these rows into paper_positions.
 
 create table if not exists public.demo_orders (
   id                bigint generated always as identity primary key,
@@ -15,8 +16,11 @@ create table if not exists public.demo_orders (
   ts                timestamptz not null default now(),
   event_ticker      text,
   kind              text,
-  client_order_id   text
+  client_order_id   text not null
 );
+
+create unique index if not exists demo_orders_client_order_id_idx
+  on public.demo_orders (client_order_id);
 
 create index if not exists demo_orders_ts_idx
   on public.demo_orders (ts desc);

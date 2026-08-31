@@ -148,9 +148,9 @@ export function readTradeEnv(get: EnvGetter): TradeEnv {
     get("KALSHI_API_BASE") || DEFAULT_DEMO_TRADE_BASE,
   );
   const tradingEnabled = parseBool(get("KALSHI_TRADING_ENABLED"), false);
-  const apiKeyId = (get("KALSHI_API_KEY_ID") || get("KALSHI_DEMO_KEY_ID") || "").trim();
+  const apiKeyId = (get("KALSHI_DEMO_KEY_ID") || get("KALSHI_API_KEY_ID") || "").trim();
   const privateKeyPem = normalizePem(
-    get("KALSHI_PRIVATE_KEY") || get("KALSHI_DEMO_PRIVATE_KEY_PEM") || "",
+    get("KALSHI_DEMO_PRIVATE_KEY_PEM") || get("KALSHI_PRIVATE_KEY") || "",
   );
   const eventCap = Math.max(1, Math.min(envInt(get, "DEMO_EVENT_CAP", 20), 50));
 
@@ -277,6 +277,9 @@ export function createKalshiDemoClient(opts: {
     endpointPath: string,
     params: Record<string, string>,
   ): Promise<T> {
+    if (endpointPath.includes("://")) {
+      throw new Error(`REFUSING non-relative Kalshi path: ${endpointPath}`);
+    }
     const url = new URL(`${base}${endpointPath.startsWith("/") ? endpointPath : `/${endpointPath}`}`);
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
     const res = await doFetch(url, {
@@ -295,6 +298,9 @@ export function createKalshiDemoClient(opts: {
     endpointPath: string,
     body?: unknown,
   ): Promise<Response> {
+    if (endpointPath.includes("://")) {
+      throw new Error(`REFUSING non-relative Kalshi path: ${endpointPath}`);
+    }
     const url = `${base}${endpointPath.startsWith("/") ? endpointPath : `/${endpointPath}`}`;
     const hdrs = headers(method, endpointPath.split("?")[0]);
     if (body !== undefined) hdrs["Content-Type"] = "application/json";
@@ -320,6 +326,9 @@ export function createKalshiDemoClient(opts: {
       return events.slice(0, cap);
     },
     async createEventOrder(body) {
+      if (body.time_in_force === "good_till_canceled" || body.time_in_force === "gtc") {
+        throw new Error("No GTC: demo trader refuses good_till_canceled");
+      }
       const res = await signed("POST", "/portfolio/events/orders", body);
       const text = await res.text();
       let json = {} as CreateEventOrderResponse;

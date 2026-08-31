@@ -44,8 +44,8 @@ Set these as **Edge Function secrets** (Vault), not in the repo:
 |---|---|---|
 | `KALSHI_TRADING_ENABLED` | `false` | Must be `true` to place demo orders. |
 | `KALSHI_API_BASE` | `https://external-api.demo.kalshi.co/trade-api/v2` | Allowlisted demo hosts only. Production hosts (`external-api.kalshi.com`, `api.elections.kalshi.com`) **crash on boot before any HTTP**. |
-| `KALSHI_API_KEY_ID` | empty | Demo API Key ID from [demo.kalshi.co](https://demo.kalshi.co/). |
-| `KALSHI_PRIVATE_KEY` | empty | Demo RSA private key PEM. `\n` escapes and base64-of-PEM are accepted. |
+| `KALSHI_API_KEY_ID` | empty | Demo API Key ID from [demo.kalshi.co](https://demo.kalshi.co/). Alias: `KALSHI_DEMO_KEY_ID`. |
+| `KALSHI_PRIVATE_KEY` | empty | Demo RSA private key PEM. `\n` escapes and base64-of-PEM are accepted. Alias: `KALSHI_DEMO_PRIVATE_KEY_PEM`. |
 | `DEMO_EVENT_CAP` | `20` | Max mutually-exclusive open demo events per run. |
 | `MIN_NET_EDGE_CENTS` | `1` | Reused from `arb.ts`. Fee / overround math is not forked. |
 
@@ -213,47 +213,6 @@ Optional scanner tuning: `MIN_NET_EDGE_CENTS` (default 1), `CONTRACTS` (default 
 applies to the **scanner paper book only**. The demo trader is hard-capped at 1
 contract per leg this week.
 
-
-## Demo paper trader (Friday cut)
-
-Edge Function `trade`, every 30 seconds, timeout 50s. Detects on **demo books
-only** (allowlisted `https://external-api.demo.kalshi.co/trade-api/v2`, alias
-`https://demo-api.kalshi.co/trade-api/v2`). Caps ~20 open mutually-exclusive
-demo events. Reuses `arb.ts` unchanged. Signed `POST /portfolio/events/orders`
-with `client_order_id` idempotency. IOC/FOK (never GTC); leftover quantity is
-cancelled in the same run. Persists to `demo_orders` (not `paper_positions`).
-
-Production hosts (`external-api.kalshi.com`, `api.elections.kalshi.com`) throw
-**before HTTP**.
-
-### Secrets / flags (runtime env, never the repo)
-
-Set these on the `trade` function (Vault later). Do not put them in `web/`,
-Pages, git, or chat.
-
-| Name | Default | Meaning |
-|---|---|---|
-| `KALSHI_TRADING_ENABLED` | `false` | Master switch. Off → boot, place **zero** orders. |
-| `KALSHI_DEMO_KEY_ID` | (empty) | Demo API key ID from demo.kalshi.co |
-| `KALSHI_DEMO_PRIVATE_KEY_PEM` | (empty) | Demo RSA private key PEM |
-
-`KALSHI_TRADING_ENABLED=true` without both key vars **fails at boot**. Disabled
-without keys is a valid start.
-
-```bash
-supabase secrets set KALSHI_TRADING_ENABLED=false
-# after the demo key exists:
-# supabase secrets set KALSHI_DEMO_KEY_ID=... KALSHI_DEMO_PRIVATE_KEY_PEM="-----BEGIN ..."
-# supabase secrets set KALSHI_TRADING_ENABLED=true
-```
-
-### This week vs next week
-
-**Friday (this cut):** REST demo paper, 30s cron, 1 contract/leg, thin DEMO
-strip on the dashboard. No WebSocket.
-
-**Next week:** WebSocket / streaming capture. A 30-second REST poll will still
-miss most live edges; WS is what makes capture real. Not this PR.
 
 ## Dashboard
 

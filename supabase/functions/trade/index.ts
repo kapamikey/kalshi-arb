@@ -20,6 +20,10 @@ import {
 } from "./client.ts";
 
 const CONTRACTS = 1;
+
+// Boot-time kill-switch: production host or enabled-without-keys fails the isolate.
+readTradeEnv((k) => Deno.env.get(k));
+
 const TIME_BUDGET_MS = 40_000;
 
 type TraderStatus = "off" | "watching" | "submitted" | "rejected";
