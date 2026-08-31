@@ -1,0 +1,5 @@
+# Canonical Fly config lives at repo-root fly.toml so the Docker build
+# context includes supabase/functions/scan (arb.ts). Deploy from the repo root:
+#   fly launch --no-deploy
+#   fly secrets set ...
+#   fly deploy
