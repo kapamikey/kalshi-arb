@@ -28,6 +28,7 @@ const emptyData: DashboardData = {
   positions: [],
   snapshots: [],
   equity: null,
+  equityUnreadable: false,
   snapshotCount: null,
 };
 
@@ -272,6 +273,13 @@ export default function App() {
         {data.equity && (
           <p className="muted" style={{ margin: "8px 0 0" }}>
             Latest paper portfolio_snapshots · {fmtNy(data.equity.ts)}
+          </p>
+        )}
+        {!data.equity && data.equityUnreadable && data.latest?.ok && (
+          <p className="err-text" style={{ margin: "8px 0 0" }}>
+            portfolio_snapshots is unreadable. Apply{" "}
+            <code>supabase/migrations/20260831_paper_equity_read.sql</code> so anon
+            can SELECT paper=true rows.
           </p>
         )}
       </section>
