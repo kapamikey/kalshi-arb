@@ -47,7 +47,8 @@ export default function App() {
   const [anonKey, setAnonKey] = useState(activeAnonKey);
   const [draftKey, setDraftKey] = useState("");
   const [data, setData] = useState<DashboardData>(emptyData);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(() => Boolean(activeAnonKey()));
+  const [ready, setReady] = useState(() => !activeAnonKey());
   const [err, setErr] = useState<string | null>(null);
   const [errKind, setErrKind] = useState<LoadErrorKind | null>(null);
   const [filter, setFilter] = useState<StatusFilter>("all");
@@ -69,6 +70,8 @@ export default function App() {
       setErr("Missing VITE_SUPABASE_ANON_KEY.");
       setErrKind("missing_key");
       setData(emptyData);
+      setLoading(false);
+      setReady(true);
       return;
     }
     setLoading(true);
@@ -83,6 +86,7 @@ export default function App() {
       setErrKind(classifyError(message));
     } finally {
       setLoading(false);
+      setReady(true);
       setNow(Date.now());
     }
   }, [url, search, kxnfl]);
@@ -120,13 +124,16 @@ export default function App() {
   const healthyEmpty =
     data.positions.length === 0 && data.latest?.ok === true && !data.stale && !err;
 
-  const healthClass = !data.latest || errKind === "missing_key"
-    ? "fail"
-    : data.stale
-      ? "stale"
-      : data.latest.ok
-        ? "ok"
-        : "fail";
+  const awaitingHealth = !ready || (loading && !data.latest);
+  const healthClass = awaitingHealth
+    ? "loading"
+    : !data.latest || errKind === "missing_key"
+      ? "fail"
+      : data.stale
+        ? "stale"
+        : data.latest.ok
+          ? "ok"
+          : "fail";
 
   function applyKey() {
     saveAnonKey(draftKey);
@@ -239,26 +246,29 @@ export default function App() {
       <section className={`health ${healthClass}`}>
         <div className="health-head">
           <div>
+            {healthClass === "loading" && <span className="pill loading">Loading</span>}
             {healthClass === "ok" && <span className="pill ok">Scanner ok</span>}
             {healthClass === "stale" && <span className="pill stale">Stale</span>}
             {healthClass === "fail" && <span className="pill fail">Unhealthy</span>}
             <span className="muted" style={{ marginLeft: 8 }}>
-              {data.latest
-                ? `${fmtNy(data.latest.ts)} · ${ago(data.latest.ts, now)}`
-                : "no scan_runs yet"}
+              {healthClass === "loading"
+                ? "Checking scan_runs…"
+                : data.latest
+                  ? `${fmtNy(data.latest.ts)} · ${ago(data.latest.ts, now)}`
+                  : "no scan_runs yet"}
             </span>
           </div>
           {data.latest?.duration_ms != null && (
             <span className="muted num">{data.latest.duration_ms} ms</span>
           )}
         </div>
-        {data.stale && data.lastOk && (
+        {healthClass !== "loading" && data.stale && data.lastOk && (
           <p style={{ margin: "8px 0 0" }}>
             Last successful scan was {ago(data.lastOk.ts, now)} ({fmtNy(data.lastOk.ts)}).
             Cron is every 5 minutes — older than 10 minutes means the job is likely dead.
           </p>
         )}
-        {data.stale && !data.lastOk && (
+        {healthClass !== "loading" && !err && data.stale && !data.lastOk && (
           <p style={{ margin: "8px 0 0" }}>
             No successful <code>scan_runs</code> in the last 20 rows. Absence of rows is
             the alert that the cron died.
@@ -270,14 +280,14 @@ export default function App() {
           </p>
         )}
         <div className="stats">
-          <div className="stat"><div className="k">Events</div><div className="v num">{data.latest?.events ?? "—"}</div></div>
-          <div className="stat"><div className="k">Markets</div><div className="v num">{data.latest?.markets ?? "—"}</div></div>
-          <div className="stat"><div className="k">Opportunities</div><div className="v num">{data.latest?.opportunities ?? "—"}</div></div>
-          <div className="stat"><div className="k">Opened</div><div className="v num">{data.latest?.positions_opened ?? "—"}</div></div>
-          <div className="stat"><div className="k">Settled</div><div className="v num">{data.latest?.positions_settled ?? "—"}</div></div>
+          <div className="stat"><div className="k">Events</div><div className="v num">{healthClass === "loading" ? <span className="skel" /> : (data.latest?.events ?? "—")}</div></div>
+          <div className="stat"><div className="k">Markets</div><div className="v num">{healthClass === "loading" ? <span className="skel" /> : (data.latest?.markets ?? "—")}</div></div>
+          <div className="stat"><div className="k">Opportunities</div><div className="v num">{healthClass === "loading" ? <span className="skel" /> : (data.latest?.opportunities ?? "—")}</div></div>
+          <div className="stat"><div className="k">Opened</div><div className="v num">{healthClass === "loading" ? <span className="skel" /> : (data.latest?.positions_opened ?? "—")}</div></div>
+          <div className="stat"><div className="k">Settled</div><div className="v num">{healthClass === "loading" ? <span className="skel" /> : (data.latest?.positions_settled ?? "—")}</div></div>
           <div className="stat">
             <div className="k">Paper equity</div>
-            <div className="v num">{dollars(data.equity?.account_value)}</div>
+            <div className="v num">{healthClass === "loading" ? <span className="skel" /> : dollars(data.equity?.account_value)}</div>
           </div>
         </div>
         {data.equity && (
@@ -310,14 +320,18 @@ export default function App() {
           <div className="stat"><div className="k">Realised P&amp;L</div><div className={`v ${pnlClass(book.realized)}`}>{dollarsFromCents(book.realized)}</div></div>
         </div>
 
-        {healthyEmpty && (
+        {!ready && shown.length === 0 && !err && (
+          <div className="empty">Loading paper book…</div>
+        )}
+
+        {ready && healthyEmpty && (
           <div className="empty">
             <strong>No exploitable cross-outcome mispricing at this 5-minute cadence.</strong>
             Scanner is healthy. An empty paper book is a real result, not a bug. Intra-market YES+NO is never arb.
           </div>
         )}
 
-        {!healthyEmpty && shown.length === 0 && !err && (
+        {ready && !healthyEmpty && shown.length === 0 && !err && (
           <div className="empty">
             <strong>No {filter === "all" ? "paper" : filter} positions.</strong>
             {data.stale || !data.latest?.ok
@@ -391,10 +405,12 @@ export default function App() {
           </div>
         </div>
         <p className="muted" style={{ margin: "0 0 10px" }}>
-          Quote inspector for run {data.latest ? `#${data.latest.id}` : "—"}. Not a live blotter.
-          {data.snapshotCount != null ? ` Showing ${data.snapshots.length} of ${data.snapshotCount}.` : null}
+          Quote inspector for run {data.latest ? `#${data.latest.id}` : ready ? "—" : "…"}. Not a live blotter.
+          {ready && data.snapshotCount != null ? ` Showing ${data.snapshots.length} of ${data.snapshotCount}.` : null}
         </p>
-        {data.snapshots.length === 0 ? (
+        {!ready && data.snapshots.length === 0 ? (
+          <div className="empty">Loading snapshots…</div>
+        ) : data.snapshots.length === 0 ? (
           <div className="empty">No snapshots for this run{kxnfl || search ? " with the current filter" : ""}.</div>
         ) : (
           <div className="table-wrap">
