@@ -17,7 +17,14 @@ import {
   scanEvent,
 } from "../supabase/functions/scan/arb.ts";
 import { clientKey, settlePosition } from "../supabase/functions/scan/paper.ts";
-import type { KalshiEvent, KalshiMarket } from "../supabase/functions/scan/kalshi.ts";
+import {
+  asCents,
+  asCount,
+  centsFromDollars,
+  normalizeMarket,
+  type KalshiEvent,
+  type KalshiMarket,
+} from "../supabase/functions/scan/kalshi.ts";
 
 /**
  * Builds a WELL-FORMED book by default: Kalshi derives the NO side from the YES
@@ -229,4 +236,93 @@ test("client key is order-independent but price-sensitive", () => {
     clientKey({ ...base, legs: [legA, legB] }),
     clientKey({ ...base, legs: [legA, { ...legB, priceCents: 47 }] }),
   );
+});
+
+test("centsFromDollars maps Kalshi dollar strings to integer cents", () => {
+  assert.equal(centsFromDollars("0.4500"), 45);
+  assert.equal(centsFromDollars("0.45"), 45);
+  assert.equal(centsFromDollars("0.0000"), 0);
+  assert.equal(centsFromDollars("1.0000"), 100);
+  assert.equal(centsFromDollars("0.1230"), 12); // deci-cent rounds to nearest cent
+  assert.equal(centsFromDollars(null), null);
+  assert.equal(centsFromDollars(""), null);
+  assert.equal(centsFromDollars("nope"), null);
+});
+
+test("asCents prefers legacy integer cents over dollar strings", () => {
+  assert.equal(asCents(45, "0.9900"), 45);
+  assert.equal(asCents(0, "0.4500"), 0);
+  assert.equal(asCents(undefined, "0.4500"), 45);
+  assert.equal(asCents(null, "0.1200"), 12);
+});
+
+test("asCount rounds volume_fp strings", () => {
+  assert.equal(asCount(1000, "9.00"), 1000);
+  assert.equal(asCount(undefined, "118109.87"), 118110);
+  assert.equal(asCount(undefined, "0.00"), 0);
+  assert.equal(asCount(undefined, null), null);
+});
+
+test("normalizeMarket fills integer-cent fields from *_dollars", () => {
+  const n = normalizeMarket({
+    ticker: "A",
+    event_ticker: "EVT",
+    status: "active",
+    yes_bid: null,
+    yes_ask: null,
+    no_bid: null,
+    no_ask: null,
+    last_price: null,
+    volume: null,
+    open_interest: null,
+    liquidity: null,
+    close_time: null,
+    yes_bid_dollars: "0.4500",
+    yes_ask_dollars: "0.4800",
+    no_bid_dollars: "0.5200",
+    no_ask_dollars: "0.5500",
+    last_price_dollars: "0.4600",
+    volume_fp: "260.00",
+    open_interest_fp: "10.00",
+    liquidity_dollars: "1.2500",
+  });
+  assert.equal(n.yes_bid, 45);
+  assert.equal(n.yes_ask, 48);
+  assert.equal(n.no_bid, 52);
+  assert.equal(n.no_ask, 55);
+  assert.equal(n.last_price, 46);
+  assert.equal(n.volume, 260);
+  assert.equal(n.open_interest, 10);
+  assert.equal(n.liquidity, 125);
+});
+
+test("dollar-string books are scannable after normalizeMarket", () => {
+  const raw = [
+    market("A", {
+      yes_bid: null, yes_ask: null, no_bid: null, no_ask: null,
+      yes_bid_dollars: "0.4300",
+      yes_ask_dollars: "0.4500",
+      no_bid_dollars: "0.5500",
+      no_ask_dollars: "0.5700",
+    }),
+    market("B", {
+      yes_bid: null, yes_ask: null, no_bid: null, no_ask: null,
+      yes_bid_dollars: "0.4600",
+      yes_ask_dollars: "0.4800",
+      no_bid_dollars: "0.5200",
+      no_ask_dollars: "0.5400",
+    }),
+  ];
+  assert.equal(scanEvent(event(raw), cfg).length, 0, "un-normalized dollar books must not fire");
+  const ms = raw.map(normalizeMarket);
+  const hits = scanEvent(event(ms), cfg);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].kind, "overround");
+  assert.equal(hits[0].costCents, 93 * 20);
+});
+
+test("un-normalized dollar floats are not treated as sub-cent asks", () => {
+  // 0.45 dollars would pass a naive 0<ask<100 check and then corrupt fee math.
+  const ms = [market("A", { yes_ask: 0.45 }), market("B", { yes_ask: 0.48 })];
+  assert.equal(checkBasket(event(ms), ms, "yes", cfg), null);
 });
