@@ -17,7 +17,7 @@ import {
   scanEvent,
 } from "../supabase/functions/scan/arb.ts";
 import { clientKey, settlePosition } from "../supabase/functions/scan/paper.ts";
-import type { KalshiEvent, KalshiMarket } from "../supabase/functions/scan/kalshi.ts";
+import { centsFrom, countFrom, normalizeMarket, type KalshiEvent, type KalshiMarket } from "../supabase/functions/scan/kalshi.ts";
 
 /**
  * Builds a WELL-FORMED book by default: Kalshi derives the NO side from the YES
@@ -229,4 +229,58 @@ test("client key is order-independent but price-sensitive", () => {
     clientKey({ ...base, legs: [legA, legB] }),
     clientKey({ ...base, legs: [legA, { ...legB, priceCents: 47 }] }),
   );
+});
+
+
+test("centsFrom reads legacy integer cents and current dollar strings", () => {
+  assert.equal(centsFrom(45, undefined), 45);
+  assert.equal(centsFrom(undefined, "0.45"), 45);
+  assert.equal(centsFrom(undefined, "0.4500"), 45);
+  assert.equal(centsFrom(undefined, 0.12), 12);
+  assert.equal(centsFrom("0.11", undefined), 11);
+  assert.equal(centsFrom("45", undefined), 45);
+  assert.equal(centsFrom(undefined, undefined), null);
+  assert.equal(centsFrom(null, ""), null);
+  // Prefer the integer-cent field when both exist.
+  assert.equal(centsFrom(45, "0.99"), 45);
+});
+
+test("countFrom reads legacy integers and *_fp strings", () => {
+  assert.equal(countFrom(1000, undefined), 1000);
+  assert.equal(countFrom(undefined, "118109.87"), 118110);
+  assert.equal(countFrom(undefined, "4.00"), 4);
+  assert.equal(countFrom(undefined, undefined), null);
+});
+
+test("normalizeMarket maps Kalshi 2026 dollar strings to integer cents", () => {
+  const n = normalizeMarket({
+    ticker: "KXTEST-1",
+    event_ticker: "KXTEST",
+    status: "active",
+    yes_bid: null,
+    yes_ask: null,
+    no_bid: null,
+    no_ask: null,
+    last_price: null,
+    volume: null,
+    open_interest: null,
+    liquidity: null,
+    close_time: null,
+    yes_bid_dollars: "0.1000",
+    yes_ask_dollars: "0.1200",
+    no_bid_dollars: "0.8800",
+    no_ask_dollars: "0.9000",
+    last_price_dollars: "0.1100",
+    volume_fp: "118109.87",
+    open_interest_fp: "40037.19",
+    liquidity_dollars: "0.0000",
+  });
+  assert.equal(n.yes_bid, 10);
+  assert.equal(n.yes_ask, 12);
+  assert.equal(n.no_bid, 88);
+  assert.equal(n.no_ask, 90);
+  assert.equal(n.last_price, 11);
+  assert.equal(n.volume, 118110);
+  assert.equal(n.open_interest, 40037);
+  assert.equal(n.liquidity, 0);
 });

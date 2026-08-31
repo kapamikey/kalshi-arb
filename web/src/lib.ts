@@ -81,6 +81,7 @@ export type DashboardData = {
   positions: PaperPosition[];
   snapshots: MarketSnapshot[];
   equity: PaperEquity | null;
+  equityError: string | null;
   snapshotCount: number | null;
 };
 
@@ -219,6 +220,7 @@ export async function loadDashboard(
   const positions = (posRes.data ?? []) as PaperPosition[];
 
   let equity: PaperEquity | null = null;
+  let equityError: string | null = null;
   const eqRes = await db
     .from("portfolio_snapshots")
     .select("ts, account_value, paper")
@@ -226,7 +228,11 @@ export async function loadDashboard(
     .order("ts", { ascending: false })
     .limit(1);
 
-  if (!eqRes.error && eqRes.data && eqRes.data.length > 0) {
+  if (eqRes.error) {
+    // Do not fail the rest of the dashboard (scan_runs / snapshots still load).
+    // Do not invent a $1,000 bankroll. Surface the blocked read instead of "—".
+    equityError = eqRes.error.message;
+  } else if (eqRes.data && eqRes.data.length > 0) {
     const row = eqRes.data[0] as { ts: string; account_value: number };
     equity = { ts: row.ts, account_value: row.account_value, source: "portfolio_snapshots" };
   }
@@ -258,5 +264,5 @@ export async function loadDashboard(
     snapshotCount = snapRes.count ?? snapshots.length;
   }
 
-  return { runs, latest, lastOk, stale, positions, snapshots, equity, snapshotCount };
+  return { runs, latest, lastOk, stale, positions, snapshots, equity, equityError, snapshotCount };
 }

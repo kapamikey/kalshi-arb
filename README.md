@@ -111,7 +111,10 @@ Local: cd web && bun install && bun dev  (http://localhost:5173).
 Env: copy web/.env.example. VITE_SUPABASE_URL defaults to the linked project. VITE_SUPABASE_ANON_KEY is the anon/publishable token only.
 If the build omits it, paste on the page (stored in localStorage only).
 
-Apply supabase/migrations/20260830_dashboard_read.sql (`supabase db push`) so anon SELECT policies exist.
+Apply supabase/migrations/20260830_dashboard_read.sql and
+supabase/migrations/20260831_paper_portfolio_read.sql (`supabase db push`, or
+the Supabase SQL editor) so anon SELECT policies exist. The second file is
+paper=true rows of portfolio_snapshots only; whale history stays hidden.
 Publish `web/dist` to the `gh-pages` branch. Rebuild: `cd web && VITE_BASE=/kalshi-arb/ bun run build`.
 
 ## Reading the results

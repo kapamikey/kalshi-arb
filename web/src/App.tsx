@@ -28,6 +28,7 @@ const emptyData: DashboardData = {
   positions: [],
   snapshots: [],
   equity: null,
+  equityError: null,
   snapshotCount: null,
 };
 
@@ -266,12 +267,19 @@ export default function App() {
           <div className="stat"><div className="k">Settled</div><div className="v num">{healthClass === "loading" ? <span className="skel" /> : (data.latest?.positions_settled ?? "—")}</div></div>
           <div className="stat">
             <div className="k">Paper equity</div>
-            <div className="v num">{healthClass === "loading" ? <span className="skel" /> : dollars(data.equity?.account_value)}</div>
+            <div className="v num">{healthClass === "loading" ? <span className="skel" /> : data.equityError ? "unreadable" : dollars(data.equity?.account_value)}</div>
           </div>
         </div>
         {data.equity && (
           <p className="muted" style={{ margin: "8px 0 0" }}>
             Latest paper portfolio_snapshots · {fmtNy(data.equity.ts)}
+          </p>
+        )}
+        {!data.equity && data.equityError && (
+          <p className="muted" style={{ margin: "8px 0 0" }}>
+            Could not read paper portfolio_snapshots ({data.equityError}). Apply{" "}
+            <code>supabase/migrations/20260831_paper_portfolio_read.sql</code>{" "}
+            with <code>supabase db push</code> (or the SQL editor). Whale rows stay hidden.
           </p>
         )}
       </section>
