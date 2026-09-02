@@ -5,6 +5,7 @@ import {
   asLegs,
   classifyError,
   clearStoredAnonKey,
+  demoOrderSentence,
   dollars,
   dollarsFromCents,
   envAnonKey,
@@ -13,6 +14,7 @@ import {
   loadDashboard,
   makeClient,
   saveAnonKey,
+  traderSentence,
   type DashboardData,
   type LoadErrorKind,
   type PaperPosition,
@@ -30,6 +32,8 @@ const emptyData: DashboardData = {
   equity: null,
   equityUnreadable: false,
   snapshotCount: null,
+  demoOrders: [],
+  traderStatus: null,
 };
 
 function pnlClass(cents: number | null | undefined): string {
@@ -140,11 +144,28 @@ export default function App() {
 
   return (
     <div className="app">
+      <section className="demo-strip">
+        <div className="demo-head">
+          <span className="pill demo">DEMO PAPER</span>
+          <p className="demo-status">{traderSentence(data.traderStatus)}</p>
+        </div>
+        <ul className="demo-orders">
+          {data.demoOrders.length === 0 ? (
+            <li className="muted">No demo orders yet.</li>
+          ) : (
+            data.demoOrders.map((row) => (
+              <li key={row.id}>{demoOrderSentence(row, now)}</li>
+            ))
+          )}
+        </ul>
+        <p className="demo-honest">Demo books ≠ live. 5-min scanner is still history.</p>
+      </section>
+
       <header className="top">
         <div>
           <h1>kalshi-arb</h1>
           <p className="sub">
-            Read-only paper book for the 5-minute scanner. No orders, no Kalshi credentials,
+            Read-only paper book for the 5-minute scanner. No Kalshi credentials,
             no service role in the browser.
           </p>
         </div>
@@ -174,7 +195,7 @@ export default function App() {
             Set <code>VITE_SUPABASE_ANON_KEY</code> (and optionally{" "}
             <code>VITE_SUPABASE_URL</code>) in <code>web/.env</code>. Never put{" "}
             <code>SUPABASE_SERVICE_ROLE_KEY</code> here. Project:{" "}
-            <code>axdikbsghdotugnotzof</code>. Pasting below stores the anon key in this
+            <code>tymnlqhakjnqwxcainwx</code>. Pasting below stores the anon key in this
             browser only — not an account.
           </p>
           <div className="key-form">
@@ -374,7 +395,7 @@ export default function App() {
 
       <section className="panel">
         <div className="section-h">
-          <h2>Latest-run snapshots</h2>
+          <h2>Latest snapshots</h2>
           <div className="row-actions">
             <input
               type="text"
@@ -392,7 +413,7 @@ export default function App() {
           </div>
         </div>
         <p className="muted" style={{ margin: "0 0 10px" }}>
-          Quote inspector for run {data.latest ? `#${data.latest.id}` : ready ? "—" : "…"}. Not a live blotter.
+          Quote inspector from market_snapshots_latest{data.latest ? ` (last scan #${data.latest.id})` : ready ? " —" : " …"}. Not a live blotter.
           {ready && data.snapshotCount != null ? ` Showing ${data.snapshots.length} of ${data.snapshotCount}.` : null}
         </p>
         {!ready && data.snapshots.length === 0 ? (

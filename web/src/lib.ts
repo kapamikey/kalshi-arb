@@ -1,6 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-export const DEFAULT_SUPABASE_URL = "https://axdikbsghdotugnotzof.supabase.co";
+export const DEFAULT_SUPABASE_URL = "https://tymnlqhakjnqwxcainwx.supabase.co";
 export const STALE_AFTER_MS = 10 * 60 * 1000;
 const STORAGE_KEY = "kalshi-arb-dashboard-anon";
 
@@ -43,6 +43,8 @@ export type PaperPosition = {
   settled_ts: string | null;
   payout_cents: number | null;
   realized_pnl_cents: number | null;
+  result?: "win" | "loss" | "open" | "flat" | "rejected" | string | null;
+  confidence?: number | null;
 };
 
 export type MarketSnapshot = {
@@ -73,6 +75,46 @@ export type PaperEquity = {
 
 export type LoadErrorKind = "missing_key" | "rls" | "network" | "other";
 
+export const TRADER_STATUS_BASKET = "__trader__";
+export const TRADER_STATUS_CLIENT_ID = "trader-status";
+
+export function isTraderSentinel(
+  row: Pick<DemoOrder, "basket_id" | "ticker" | "client_order_id"> | null | undefined,
+): boolean {
+  if (!row) return false;
+  return (
+    row.basket_id === TRADER_STATUS_BASKET ||
+    row.client_order_id === TRADER_STATUS_CLIENT_ID ||
+    row.ticker === "_"
+  );
+}
+
+export function pickTraderStatus(rows: DemoOrder[]): DemoOrder | null {
+  return (
+    rows.find(isTraderSentinel) ??
+    rows.find((r) => r.status === "watching" || r.status === "no_edge") ??
+    null
+  );
+}
+
+export function realDemoOrders(rows: DemoOrder[], limit = 3): DemoOrder[] {
+  return rows.filter((r) => !isTraderSentinel(r)).slice(0, limit);
+}
+
+export type DemoOrder = {
+  id: number;
+  basket_id: string;
+  ticker: string;
+  side: string;
+  status: string;
+  kalshi_order_id: string | null;
+  reject_reason: string | null;
+  ts: string;
+  event_ticker: string | null;
+  kind: string | null;
+  client_order_id: string | null;
+};
+
 export type DashboardData = {
   runs: ScanRun[];
   latest: ScanRun | null;
@@ -84,6 +126,8 @@ export type DashboardData = {
   /** True when the portfolio_snapshots read failed (RLS/permission), not when it is empty. */
   equityUnreadable: boolean;
   snapshotCount: number | null;
+  demoOrders: DemoOrder[];
+  traderStatus: DemoOrder | null;
 };
 
 export function envAnonKey(): string {
@@ -190,6 +234,49 @@ function sanitizeSearch(q: string): string {
   return q.replace(/[,()%.]/g, " ").trim().slice(0, 64);
 }
 
+
+export function traderSentence(row: DemoOrder | null): string {
+  // Only an explicit off, or a missing row that is not the heartbeat sentinel, is OFF.
+  if (row?.status === "off") return "Trader OFF";
+  if (!row) return "Trader OFF";
+  if (row.status === "submitted" || row.status === "filled" || row.status === "cancelled") {
+    const kind = row.kind || "basket";
+    const event = row.event_ticker || "event";
+    return `Submitted ${kind} on ${event}`;
+  }
+  if (row.status === "rejected") {
+    return `Demo rejected: ${row.reject_reason || "unknown"}`;
+  }
+  if (
+    row.status === "watching" ||
+    row.status === "no_edge" ||
+    row.ticker === "_" ||
+    row.basket_id === TRADER_STATUS_BASKET ||
+    isTraderSentinel(row)
+  ) {
+    return "Trader on. Watching demo. No edge.";
+  }
+  return "Trader OFF";
+}
+
+export function demoOrderSentence(row: DemoOrder, now = Date.now()): string {
+  const when = `${fmtNy(row.ts)} · ${ago(row.ts, now)}`;
+  const side = row.side === "no" ? "NO" : "YES";
+  if (row.status === "rejected") {
+    const reason = row.reject_reason ? ` (${row.reject_reason})` : "";
+    return `${when}: tried ${side} ${row.ticker} — rejected${reason}`;
+  }
+  if (row.status === "filled") {
+    const id = row.kalshi_order_id ? ` ${row.kalshi_order_id}` : "";
+    return `${when}: buy ${side} ${row.ticker} — filled${id}`;
+  }
+  if (row.status === "submitted") {
+    const id = row.kalshi_order_id ? ` ${row.kalshi_order_id}` : "";
+    return `${when}: buy ${side} ${row.ticker} — submitted${id}`;
+  }
+  return `${when}: ${side} ${row.ticker} — ${row.status}`;
+}
+
 export async function loadDashboard(
   db: SupabaseClient,
   opts: { search: string; kxnfl: boolean },
@@ -212,7 +299,7 @@ export async function loadDashboard(
   const posRes = await db
     .from("paper_positions")
     .select(
-      "id, client_key, opened_ts, event_ticker, series_ticker, title, kind, legs, contracts, cost_cents, fee_cents, guaranteed_payout_cents, locked_pnl_cents, status, close_time, settled_ts, payout_cents, realized_pnl_cents",
+      "id, client_key, opened_ts, event_ticker, series_ticker, title, kind, legs, contracts, cost_cents, fee_cents, guaranteed_payout_cents, locked_pnl_cents, status, close_time, settled_ts, payout_cents, realized_pnl_cents, result, confidence",
     )
     .order("opened_ts", { ascending: false })
     .limit(500);
@@ -240,30 +327,72 @@ export async function loadDashboard(
 
   let snapshots: MarketSnapshot[] = [];
   let snapshotCount: number | null = null;
-  if (latest) {
-    let q = db
-      .from("market_snapshots")
-      .select(
-        "id, run_id, ts, ticker, event_ticker, series_ticker, title, status, yes_bid, yes_ask, no_bid, no_ask, last_price, volume, open_interest, liquidity, close_time",
-        { count: "exact" },
-      )
-      .eq("run_id", latest.id)
-      .order("ticker", { ascending: true })
-      .limit(80);
+  // Peek the latest quote per ticker from the view, not the append-only history table.
+  let q = db
+    .from("market_snapshots_latest")
+    .select(
+      "id, run_id, ts, ticker, event_ticker, series_ticker, title, status, yes_bid, yes_ask, no_bid, no_ask, last_price, volume, open_interest, liquidity, close_time",
+      { count: "exact" },
+    )
+    .order("ticker", { ascending: true })
+    .limit(80);
 
-    if (opts.kxnfl) q = q.ilike("series_ticker", "KXNFL%");
-    const search = sanitizeSearch(opts.search);
-    if (search) {
-      q = q.or(
-        `ticker.ilike.%${search}%,event_ticker.ilike.%${search}%,series_ticker.ilike.%${search}%,title.ilike.%${search}%`,
-      );
-    }
-
-    const snapRes = await q;
-    if (snapRes.error) throw new Error(snapRes.error.message);
-    snapshots = (snapRes.data ?? []) as MarketSnapshot[];
-    snapshotCount = snapRes.count ?? snapshots.length;
+  if (opts.kxnfl) q = q.ilike("series_ticker", "KXNFL%");
+  const search = sanitizeSearch(opts.search);
+  if (search) {
+    q = q.or(
+      `ticker.ilike.%${search}%,event_ticker.ilike.%${search}%,series_ticker.ilike.%${search}%,title.ilike.%${search}%`,
+    );
   }
 
-  return { runs, latest, lastOk, stale, positions, snapshots, equity, equityUnreadable, snapshotCount };
+  const snapRes = await q;
+  if (snapRes.error) throw new Error(snapRes.error.message);
+  snapshots = (snapRes.data ?? []) as MarketSnapshot[];
+  snapshotCount = snapRes.count ?? snapshots.length;
+
+  const DEMO_COLS =
+    "id, basket_id, ticker, side, status, kalshi_order_id, reject_reason, ts, event_ticker, kind, client_order_id";
+
+  let demoOrders: DemoOrder[] = [];
+  let traderStatus: DemoOrder | null = null;
+  const statusRes = await db
+    .from("demo_orders")
+    .select(DEMO_COLS)
+    .eq("basket_id", TRADER_STATUS_BASKET)
+    .order("ts", { ascending: false })
+    .limit(1);
+  if (!statusRes.error) {
+    traderStatus = ((statusRes.data ?? [])[0] as DemoOrder | undefined) ?? null;
+  }
+  const demoRes = await db
+    .from("demo_orders")
+    .select(DEMO_COLS)
+    .neq("basket_id", TRADER_STATUS_BASKET)
+    .order("ts", { ascending: false })
+    .limit(3);
+  if (!demoRes.error) {
+    // Never count the heartbeat sentinel as a fill, even if the neq filter slips.
+    demoOrders = realDemoOrders((demoRes.data ?? []) as DemoOrder[], 3);
+  }
+
+  // If the dedicated status query errors or returns empty, recover from a
+  // watching / __trader__ / ticker "_" row instead of silently becoming OFF.
+  if (statusRes.error || !traderStatus || demoRes.error) {
+    const wideRes = await db
+      .from("demo_orders")
+      .select(DEMO_COLS)
+      .order("ts", { ascending: false })
+      .limit(12);
+    if (!wideRes.error) {
+      const wide = (wideRes.data ?? []) as DemoOrder[];
+      if (!traderStatus) {
+        traderStatus = pickTraderStatus(wide);
+      }
+      if (demoRes.error) {
+        demoOrders = realDemoOrders(wide, 3);
+      }
+    }
+  }
+
+  return { runs, latest, lastOk, stale, positions, snapshots, equity, equityUnreadable, snapshotCount, demoOrders, traderStatus };
 }

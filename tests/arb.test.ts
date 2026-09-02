@@ -16,6 +16,7 @@ import {
   feeCents,
   scanEvent,
 } from "../supabase/functions/scan/arb.ts";
+import { confidenceFromEdge, kalshiTakerFeeCents, settleResult } from "../supabase/functions/scan/fees.ts";
 import { clientKey, settlePosition } from "../supabase/functions/scan/paper.ts";
 import {
   asCents,
@@ -236,6 +237,62 @@ test("client key is order-independent but price-sensitive", () => {
     clientKey({ ...base, legs: [legA, legB] }),
     clientKey({ ...base, legs: [legA, { ...legB, priceCents: 47 }] }),
   );
+});
+
+
+test("confidence 1-10 mapping from locked pnl vs fees", () => {
+  assert.equal(confidenceFromEdge(-5, 10), 1);
+  assert.equal(confidenceFromEdge(0, 10), 1);
+  assert.equal(confidenceFromEdge(2, 10), 2);   // 0.2
+  assert.equal(confidenceFromEdge(3, 10), 3);   // 0.3
+  assert.equal(confidenceFromEdge(6, 10), 4);   // 0.6
+  assert.equal(confidenceFromEdge(8, 10), 5);   // 0.8
+  assert.equal(confidenceFromEdge(12, 10), 6);  // 1.2
+  assert.equal(confidenceFromEdge(18, 10), 7);  // 1.8
+  assert.equal(confidenceFromEdge(25, 10), 8);  // 2.5
+  assert.equal(confidenceFromEdge(40, 10), 9);  // 4
+  assert.equal(confidenceFromEdge(50, 10), 10); // 5
+  assert.equal(confidenceFromEdge(5, 0), 10);
+  assert.equal(confidenceFromEdge(0, 0), 1);
+});
+
+test("settleResult is win/loss/flat", () => {
+  assert.equal(settleResult(1), "win");
+  assert.equal(settleResult(-1), "loss");
+  assert.equal(settleResult(0), "flat");
+});
+
+test("kalshiTakerFeeCents uses RPC result when present", async () => {
+  const calls: unknown[] = [];
+  const db = {
+    async rpc(fn: string, args: Record<string, unknown>) {
+      calls.push({ fn, args });
+      return { data: 7, error: null };
+    },
+  };
+  const n = await kalshiTakerFeeCents(db, {
+    contracts: 1,
+    price_cents: 50,
+    fee_multiplier: 1,
+    fee_rate: 0.07,
+  });
+  assert.equal(n, 7);
+  assert.equal(calls.length, 1);
+  assert.equal((calls[0] as { fn: string }).fn, "kalshi_taker_fee_cents");
+});
+
+test("kalshiTakerFeeCents falls back to arb.ts when RPC fails", async () => {
+  const db = {
+    async rpc() {
+      return { data: null, error: { message: "function missing" } };
+    },
+  };
+  const n = await kalshiTakerFeeCents(db, {
+    contracts: 1,
+    price_cents: 50,
+    fee_multiplier: 1,
+  });
+  assert.equal(n, feeCents(1, 50));
 });
 
 test("centsFromDollars maps Kalshi dollar strings to integer cents", () => {

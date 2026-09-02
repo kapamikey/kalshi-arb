@@ -14,8 +14,16 @@
 
 import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2";
 import { fetchMarketsByTickers, fetchOpenEvents, type KalshiEvent } from "./kalshi.ts";
-import { DEFAULT_SCAN_CONFIG, scanEvent, type ArbOpportunity, type ScanConfig } from "./arb.ts";
+import { DEFAULT_SCAN_CONFIG, scanEvent, type ScanConfig } from "./arb.ts";
 import { clientKey, settlePosition } from "./paper.ts";
+import {
+  DEMO_LOT,
+  confidenceFromEdge,
+  priceAllOpportunities,
+  settleResult,
+  type PricedOpportunity,
+} from "./fees.ts";
+import { emptyBookSkippedRow, insertOpportunities, opportunityRow } from "./opportunities.ts";
 
 const PAPER_STARTING_BANKROLL_CENTS = 100_000; // $1,000, matching existing paper rows
 
@@ -28,7 +36,8 @@ function config(): ScanConfig {
   return {
     ...DEFAULT_SCAN_CONFIG,
     minNetEdgeCents: envInt("MIN_NET_EDGE_CENTS", DEFAULT_SCAN_CONFIG.minNetEdgeCents),
-    contracts: envInt("CONTRACTS", DEFAULT_SCAN_CONFIG.contracts),
+    // Demo / CoS paper book is 1 lot per leg. Detection tests still use DEFAULT 20.
+    contracts: envInt("CONTRACTS", DEMO_LOT),
   };
 }
 
@@ -70,7 +79,7 @@ async function insertAll(db: SupabaseClient, table: string, rows: unknown[], siz
 async function settleOpenPositions(db: SupabaseClient, now: string): Promise<number> {
   const { data: open, error } = await db
     .from("paper_positions")
-    .select("id, legs, cost_cents, fee_cents")
+    .select("id, legs, cost_cents, fee_cents, locked_pnl_cents, confidence")
     .eq("status", "open");
   if (error) throw new Error(`select paper_positions: ${error.message}`);
   if (!open?.length) return 0;
@@ -91,9 +100,22 @@ async function settleOpenPositions(db: SupabaseClient, now: string): Promise<num
     if (legs.some((l) => !results.has(l.ticker))) continue;
 
     const { payout_cents, realized_pnl_cents } = settlePosition(pos, settledYes);
+    const result = settleResult(realized_pnl_cents);
+    const existing = typeof pos.confidence === "number" ? pos.confidence : null;
+    const confidence = existing ?? confidenceFromEdge(
+      Number(pos.locked_pnl_cents) || realized_pnl_cents,
+      Number(pos.fee_cents) || 0,
+    );
     const { error: upErr } = await db
       .from("paper_positions")
-      .update({ status: "settled", settled_ts: now, payout_cents, realized_pnl_cents })
+      .update({
+        status: "settled",
+        settled_ts: now,
+        payout_cents,
+        realized_pnl_cents,
+        result,
+        confidence,
+      })
       .eq("id", pos.id);
     if (upErr) throw new Error(`settle position ${pos.id}: ${upErr.message}`);
     settled++;
@@ -110,10 +132,11 @@ async function settleOpenPositions(db: SupabaseClient, now: string): Promise<num
  */
 async function openPaperPositions(
   db: SupabaseClient,
-  opportunities: ArbOpportunity[],
+  opportunities: PricedOpportunity[],
   now: string,
-): Promise<number> {
-  if (!opportunities.length) return 0;
+): Promise<Map<string, number>> {
+  const ids = new Map<string, number>();
+  if (!opportunities.length) return ids;
 
   const rows = opportunities.map((o) => ({
     client_key: clientKey(o),
@@ -122,22 +145,28 @@ async function openPaperPositions(
     series_ticker: o.seriesTicker,
     title: o.title,
     kind: o.kind,
+    // price_cents / fee_type / fee_multiplier live in legs jsonb (no those columns here)
     legs: o.legs,
-    contracts: o.contracts,
+    contracts: DEMO_LOT,
     cost_cents: o.costCents,
     fee_cents: o.feeCents,
     guaranteed_payout_cents: o.guaranteedPayoutCents,
     locked_pnl_cents: o.netEdgeCents,
     status: "open",
+    result: "open",
+    confidence: o.confidence,
     close_time: o.closeTime,
   }));
 
   const { data, error } = await db
     .from("paper_positions")
     .upsert(rows, { onConflict: "client_key", ignoreDuplicates: true })
-    .select("id");
+    .select("id, client_key");
   if (error) throw new Error(`insert paper_positions: ${error.message}`);
-  return data?.length ?? 0;
+  for (const row of data ?? []) {
+    ids.set(row.client_key as string, row.id as number);
+  }
+  return ids;
 }
 
 /** Equity = starting bankroll + realised P&L. Unsettled baskets are not marked to market. */
@@ -154,7 +183,14 @@ async function writeEquityPoint(db: SupabaseClient, ts: string) {
     account_value: (PAPER_STARTING_BANKROLL_CENTS + realised) / 100,
     paper: true,
   });
-  if (insErr) throw new Error(`insert portfolio_snapshots: ${insErr.message}`);
+  if (insErr) {
+    const msg = insErr.message ?? '';
+    if (/portfolio_snapshots|schema cache|does not exist/i.test(msg)) {
+      console.warn(`skip equity point: ${msg}`);
+      return;
+    }
+    throw new Error(`insert portfolio_snapshots: ${msg}`);
+  }
 }
 
 async function run(): Promise<Response> {
@@ -178,8 +214,39 @@ async function run(): Promise<Response> {
     const rows = snapshotRows(runId, events, nowIso);
     await insertAll(db, "market_snapshots", rows);
 
-    const opportunities = events.flatMap((e) => scanEvent(e, cfg));
-    const opened = await openPaperPositions(db, opportunities, nowIso);
+    const detected = events.flatMap((e) => scanEvent(e, cfg));
+    const priced = await priceAllOpportunities(db, detected);
+    const takeable = priced.filter((o) => o.netEdgeCents >= cfg.minNetEdgeCents);
+    const openedIds = await openPaperPositions(db, takeable, nowIso);
+    if (priced.length === 0) {
+      await insertOpportunities(db, [emptyBookSkippedRow({ runId, events: events.length })]);
+    } else {
+      await insertOpportunities(
+        db,
+        priced.map((o) => {
+          const paperId = openedIds.get(clientKey(o));
+          if (paperId != null) {
+            return opportunityRow({
+              opp: o,
+              runId,
+              decision: "taken",
+              reason: "paper 1 lot",
+              paperPositionId: paperId,
+            });
+          }
+          return opportunityRow({
+            opp: o,
+            runId,
+            decision: "skipped",
+            reason: o.netEdgeCents < cfg.minNetEdgeCents
+              ? "below min net edge after fees"
+              : "already open",
+          });
+        }),
+      );
+    }
+    const opened = openedIds.size;
+    const opportunities = takeable;
     const settled = await settleOpenPositions(db, nowIso);
     await writeEquityPoint(db, nowIso);
 

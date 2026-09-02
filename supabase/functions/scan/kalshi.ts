@@ -207,3 +207,39 @@ export async function fetchMarketsByTickers(tickers: string[]): Promise<KalshiMa
 
   return out;
 }
+
+export type SeriesFee = {
+  fee_type: string;
+  fee_multiplier: number;
+};
+
+const DEFAULT_SERIES_FEE: SeriesFee = { fee_type: "quadratic", fee_multiplier: 1 };
+
+const seriesFeeCache = new Map<string, SeriesFee>();
+
+/**
+ * GET /series/{ticker} for fee_type + fee_multiplier (typical quadratic taker).
+ * Cached per isolate. Missing ticker or a failed fetch falls back to quadratic × 1.
+ */
+export async function fetchSeriesFee(seriesTicker: string): Promise<SeriesFee> {
+  const ticker = seriesTicker.trim();
+  if (!ticker) return DEFAULT_SERIES_FEE;
+  const hit = seriesFeeCache.get(ticker);
+  if (hit) return hit;
+  try {
+    const body = await getJson<{ series?: { fee_type?: string; fee_multiplier?: number } }>(
+      `/series/${encodeURIComponent(ticker)}`,
+      {},
+    );
+    const s = body.series ?? {};
+    const fee_type = typeof s.fee_type === "string" && s.fee_type ? s.fee_type : DEFAULT_SERIES_FEE.fee_type;
+    const m = Number(s.fee_multiplier);
+    const fee_multiplier = Number.isFinite(m) && m > 0 ? m : DEFAULT_SERIES_FEE.fee_multiplier;
+    const fee = { fee_type, fee_multiplier };
+    seriesFeeCache.set(ticker, fee);
+    return fee;
+  } catch {
+    seriesFeeCache.set(ticker, DEFAULT_SERIES_FEE);
+    return DEFAULT_SERIES_FEE;
+  }
+}
