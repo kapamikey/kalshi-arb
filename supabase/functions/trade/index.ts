@@ -1,32 +1,39 @@
 /**
- * Demo paper trader. 30-second cron, demo books + demo orders only.
+ * 30-second ticket refresh. Production books + depth; NEVER places orders.
  *
- * Off by default (KALSHI_TRADING_ENABLED). Production Trade API hosts crash
- * on boot before any HTTP. The public 5-minute `scan` function is unchanged
- * and still has no Kalshi credentials.
+ * Demo Trade API POSTs belong on the human Approve path (`approve` function).
+ * Production Trade API hosts still crash the isolate at boot (kill-switch).
+ * Demo books are not ticket prices.
  */
 
 import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2";
-import { DEFAULT_SCAN_CONFIG, scanEvent, type ArbOpportunity } from "../scan/arb.ts";
-import { clientKey } from "../scan/paper.ts";
+import {
+  fetchExclusiveOpenEvents,
+  fetchOrderbook,
+  fetchSeries,
+  mapPool,
+  type DisplayedAsks,
+  type KalshiEvent,
+} from "../scan/kalshi.ts";
+import {
+  CRON_POSTS_ORDERS,
+  TICKET_TTL_MS,
+  scoreEventTickets,
+  seriesAllowed,
+  type TicketDraft,
+} from "./tickets.ts";
 import {
   TRADER_STATUS_BASKET,
   TRADER_STATUS_CLIENT_ID,
-  createKalshiDemoClient,
-  eventOrderBody,
   readTradeEnv,
-  stableClientOrderId,
-  type DemoKalshiClient,
 } from "./client.ts";
 
-const CONTRACTS = 1;
-
-// Boot-time kill-switch: production host or enabled-without-keys fails the isolate.
+// Boot-time kill-switch: production Trade API host fails the isolate before HTTP.
 readTradeEnv((k) => Deno.env.get(k));
 
-const TIME_BUDGET_MS = 40_000;
-
-type TraderStatus = "off" | "watching" | "submitted" | "rejected";
+const TIME_BUDGET_MS = 45_000;
+const EVENT_CAP = 20;
+const ORDERBOOK_CONCURRENCY = 12;
 
 type DemoOrderRow = {
   basket_id: string;
@@ -47,13 +54,7 @@ function nowIso(): string {
 
 async function upsertTraderStatus(
   db: SupabaseClient,
-  row: {
-    status: TraderStatus;
-    ts: string;
-    event_ticker?: string | null;
-    kind?: string | null;
-    reject_reason?: string | null;
-  },
+  row: { status: string; ts: string; reject_reason?: string | null },
 ) {
   const payload: DemoOrderRow = {
     basket_id: TRADER_STATUS_BASKET,
@@ -63,8 +64,8 @@ async function upsertTraderStatus(
     kalshi_order_id: null,
     reject_reason: row.reject_reason ?? null,
     ts: row.ts,
-    event_ticker: row.event_ticker ?? null,
-    kind: row.kind ?? null,
+    event_ticker: null,
+    kind: null,
     client_order_id: TRADER_STATUS_CLIENT_ID,
   };
   const { error } = await db.from("demo_orders").upsert(payload, {
@@ -73,144 +74,108 @@ async function upsertTraderStatus(
   if (error) throw new Error(`upsert demo trader status: ${error.message}`);
 }
 
-async function insertOrder(db: SupabaseClient, row: DemoOrderRow) {
-  const { error } = await db.from("demo_orders").upsert(row, {
-    onConflict: "client_order_id",
-  });
-  if (error) throw new Error(`upsert demo_orders: ${error.message}`);
-}
-
-function rejectText(
-  status: number,
-  json: { message?: string; error?: string },
-  text: string,
-): string {
-  return json.message || json.error || text.slice(0, 180) || `HTTP ${status}`;
-}
-
-function fillCount(json: { fill_count?: string }): number {
-  const n = Number.parseFloat(json.fill_count ?? "0");
-  return Number.isFinite(n) ? n : 0;
-}
-
-function remainingCount(json: { remaining_count?: string }): number {
-  const n = Number.parseFloat(json.remaining_count ?? "0");
-  return Number.isFinite(n) ? n : 0;
-}
-
-async function alreadyWorked(db: SupabaseClient, basketId: string): Promise<boolean> {
+async function expireStaleOpen(db: SupabaseClient, nowMs: number): Promise<number> {
+  const cutoff = new Date(nowMs - TICKET_TTL_MS).toISOString();
   const { data, error } = await db
-    .from("demo_orders")
-    .select("id, status")
-    .eq("basket_id", basketId)
-    .in("status", ["submitted", "filled"])
-    .limit(1);
-  if (error) throw new Error(`select demo_orders: ${error.message}`);
-  return (data?.length ?? 0) > 0;
+    .from("tickets")
+    .update({ status: "expired" })
+    .eq("status", "open")
+    .lt("quoted_ts", cutoff)
+    .select("id");
+  if (error) throw new Error(`expire tickets: ${error.message}`);
+  return data?.length ?? 0;
 }
 
-async function placeBasket(
-  db: SupabaseClient,
-  client: DemoKalshiClient,
-  opp: ArbOpportunity,
-  ts: string,
-): Promise<{ ok: boolean; reason?: string }> {
-  const basketId = clientKey(opp);
+async function replaceOpenTickets(db: SupabaseClient, drafts: TicketDraft[], ts: string) {
+  const { error: closeErr } = await db
+    .from("tickets")
+    .update({ status: "expired" })
+    .eq("status", "open");
+  if (closeErr) throw new Error(`close prior tickets: ${closeErr.message}`);
 
-  for (const leg of opp.legs) {
-    const clientOrderId = await stableClientOrderId(
-      `${basketId}|${leg.ticker}|${leg.side}|${leg.priceCents}|${CONTRACTS}`,
-    );
-    const attempted: DemoOrderRow = {
-      basket_id: basketId,
-      ticker: leg.ticker,
-      side: leg.side,
-      status: "attempted",
-      kalshi_order_id: null,
-      reject_reason: null,
-      ts,
-      event_ticker: opp.eventTicker,
-      kind: opp.kind,
-      client_order_id: clientOrderId,
-    };
-    await insertOrder(db, attempted);
+  if (!drafts.length) return 0;
+  const rows = drafts.map((d) => ({
+    event_ticker: d.event_ticker,
+    title: d.title,
+    kind: d.kind,
+    legs: d.legs,
+    quoted_ts: d.quoted_ts || ts,
+    fee_cents: d.fee_cents,
+    net_edge_cents: d.net_edge_cents,
+    optimistic_pnl_cents: d.optimistic_pnl_cents,
+    conservative_pnl_cents: d.conservative_pnl_cents,
+    status: "open",
+    demo_order_ids: null,
+  }));
+  const { data, error } = await db.from("tickets").insert(rows).select("id");
+  if (error) throw new Error(`insert tickets: ${error.message}`);
+  return data?.length ?? 0;
+}
 
-    const body = eventOrderBody(
-      { ticker: leg.ticker, side: leg.side, priceCents: leg.priceCents },
-      clientOrderId,
-    );
-    const res = await client.createEventOrder(body);
-    const json = res.json as {
-      order_id?: string;
-      fill_count?: string;
-      remaining_count?: string;
-      message?: string;
-      error?: string;
-    };
-
-    if (res.status === 409) {
-      await insertOrder(db, {
-        ...attempted,
-        status: "submitted",
-        kalshi_order_id: json.order_id ?? null,
-        reject_reason: "idempotent replay (client_order_id already exists)",
-      });
-      continue;
-    }
-
-    if (res.status >= 200 && res.status < 300) {
-      const filled = fillCount(json);
-      const remaining = remainingCount(json);
-      if (remaining > 0 && json.order_id) {
-        try {
-          await client.cancelEventOrder(json.order_id);
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          await insertOrder(db, {
-            ...attempted,
-            status: "rejected",
-            kalshi_order_id: json.order_id ?? null,
-            reject_reason: `remainder cancel failed: ${message}`,
-          });
-          return { ok: false, reason: `remainder cancel failed: ${message}` };
-        }
-      }
-      if (filled <= 0) {
-        const reason = "unfilled (fill_or_kill)";
-        await insertOrder(db, {
-          ...attempted,
-          status: "rejected",
-          kalshi_order_id: json.order_id ?? null,
-          reject_reason: reason,
-        });
-        return { ok: false, reason };
-      }
-      await insertOrder(db, {
-        ...attempted,
-        status: remaining > 0 ? "submitted" : "filled",
-        kalshi_order_id: json.order_id ?? null,
-        reject_reason: remaining > 0 ? "canceled remainder in-run" : null,
-      });
-      continue;
-    }
-
-    const reason = rejectText(res.status, json, res.text);
-    await insertOrder(db, {
-      ...attempted,
-      status: "rejected",
-      kalshi_order_id: json.order_id ?? null,
-      reject_reason: reason,
-    });
-    return { ok: false, reason };
+export async function refreshTickets(opts: {
+  db: SupabaseClient;
+  started: number;
+  ts: string;
+}): Promise<{ events: number; books: number; written: number; expired: number }> {
+  if (CRON_POSTS_ORDERS) {
+    throw new Error("Ticket cron must not POST; CRON_POSTS_ORDERS is a tripwire");
   }
 
-  return { ok: true };
+  const expired = await expireStaleOpen(opts.db, opts.started);
+  const cap = Math.max(1, Math.min(
+    Number.parseInt(Deno.env.get("DEMO_EVENT_CAP") ?? "", 10) || EVENT_CAP,
+    EVENT_CAP,
+  ));
+
+  const events = await fetchExclusiveOpenEvents(cap);
+  const seriesTickers = [...new Set(events.map((e) => e.series_ticker ?? "").filter(Boolean))];
+  const seriesMap = new Map<string, Awaited<ReturnType<typeof fetchSeries>>>();
+  await mapPool(seriesTickers, 8, async (t) => {
+    seriesMap.set(t, await fetchSeries(t));
+    return t;
+  });
+
+  const usable: KalshiEvent[] = [];
+  const feeByEvent = new Map<string, number>();
+  for (const e of events) {
+    if (Date.now() - opts.started > TIME_BUDGET_MS) break;
+    const allowed = seriesAllowed(seriesMap.get(e.series_ticker ?? "") ?? null, e.series_ticker ?? "");
+    if (!allowed.ok) continue;
+    usable.push(e);
+    feeByEvent.set(e.event_ticker, allowed.feeRate);
+  }
+
+  const tickers: string[] = [];
+  for (const e of usable) {
+    for (const m of e.markets ?? []) tickers.push(m.ticker);
+  }
+
+  const books = new Map<string, DisplayedAsks>();
+  await mapPool(tickers, ORDERBOOK_CONCURRENCY, async (ticker) => {
+    if (Date.now() - opts.started > TIME_BUDGET_MS) return ticker;
+    try {
+      books.set(ticker, await fetchOrderbook(ticker));
+    } catch {
+      // missing book → depth unknown → no ticket for that event
+    }
+    return ticker;
+  });
+
+  const drafts: TicketDraft[] = [];
+  for (const e of usable) {
+    const feeRate = feeByEvent.get(e.event_ticker);
+    if (feeRate == null) continue;
+    drafts.push(...scoreEventTickets(e, books, feeRate, opts.ts));
+  }
+
+  const written = await replaceOpenTickets(opts.db, drafts, opts.ts);
+  return { events: events.length, books: books.size, written, expired };
 }
 
 async function run(): Promise<Response> {
   const started = Date.now();
   const ts = nowIso();
-  const env = readTradeEnv((k) => Deno.env.get(k));
+  readTradeEnv((k) => Deno.env.get(k));
 
   const db = createClient(
     Deno.env.get("SUPABASE_URL")!,
@@ -218,95 +183,21 @@ async function run(): Promise<Response> {
     { auth: { persistSession: false } },
   );
 
-  if (!env.tradingEnabled) {
-    await upsertTraderStatus(db, { status: "off", ts });
-    return Response.json({
-      ok: true,
-      trading: false,
-      placed: 0,
-      duration_ms: Date.now() - started,
-    });
-  }
-
-  const client = createKalshiDemoClient({
-    apiBase: env.apiBase,
-    apiKeyId: env.apiKeyId,
-    privateKeyPem: env.privateKeyPem,
-  });
-
   try {
-    const events = await client.fetchCappedExclusiveEvents(env.eventCap);
-    const cfg = { ...DEFAULT_SCAN_CONFIG, contracts: CONTRACTS };
-    const opportunities = events
-      .flatMap((e) => scanEvent(e, cfg))
-      .sort((a, b) => b.netEdgeCents - a.netEdgeCents);
-
-    if (!opportunities.length) {
-      await upsertTraderStatus(db, { status: "watching", ts });
-      return Response.json({
-        ok: true,
-        trading: true,
-        events: events.length,
-        opportunities: 0,
-        placed: 0,
-        duration_ms: Date.now() - started,
-      });
-    }
-
-    let placed = 0;
-    let lastReject: string | undefined;
-    let lastOpp: ArbOpportunity | undefined;
-
-    for (const opp of opportunities) {
-      if (Date.now() - started > TIME_BUDGET_MS) break;
-      if (await alreadyWorked(db, clientKey(opp))) continue;
-      lastOpp = opp;
-      const result = await placeBasket(db, client, opp, ts);
-      if (result.ok) {
-        placed++;
-        await upsertTraderStatus(db, {
-          status: "submitted",
-          ts,
-          event_ticker: opp.eventTicker,
-          kind: opp.kind,
-        });
-        break;
-      }
-      lastReject = result.reason;
-      await upsertTraderStatus(db, {
-        status: "rejected",
-        ts,
-        event_ticker: opp.eventTicker,
-        kind: opp.kind,
-        reject_reason: result.reason,
-      });
-      break;
-    }
-
-    if (placed === 0 && !lastReject) {
-      await upsertTraderStatus(db, { status: "watching", ts });
-    }
-
+    const result = await refreshTickets({ db, started, ts });
+    await upsertTraderStatus(db, { status: "watching", ts });
     return Response.json({
       ok: true,
-      trading: true,
-      events: events.length,
-      opportunities: opportunities.length,
-      placed,
-      event: lastOpp?.eventTicker ?? null,
-      kind: lastOpp?.kind ?? null,
-      reject: lastReject ?? null,
+      posted: false,
+      cron_posts_orders: CRON_POSTS_ORDERS,
+      ...result,
       duration_ms: Date.now() - started,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await upsertTraderStatus(db, {
-      status: "rejected",
-      ts,
-      reject_reason: message,
-    });
+    await upsertTraderStatus(db, { status: "watching", ts, reject_reason: message });
     return Response.json(
-      { ok: false, trading: true, error: message, duration_ms: Date.now() - started },
+      { ok: false, posted: false, error: message, duration_ms: Date.now() - started },
       { status: 500 },
     );
   }
@@ -317,6 +208,6 @@ Deno.serve(async () => {
     return await run();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return Response.json({ ok: false, error: message }, { status: 500 });
+    return Response.json({ ok: false, posted: false, error: message }, { status: 500 });
   }
 });

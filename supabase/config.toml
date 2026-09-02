@@ -1,0 +1,4 @@
+# Project is linked as axdikbsghdotugnotzof.
+# Approve is human-gated (JWT). Trade cron uses the service-role bearer.
+[functions.approve]
+verify_jwt = true
