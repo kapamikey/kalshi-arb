@@ -76,6 +76,30 @@ export type PaperEquity = {
 export type LoadErrorKind = "missing_key" | "rls" | "network" | "other";
 
 export const TRADER_STATUS_BASKET = "__trader__";
+export const TRADER_STATUS_CLIENT_ID = "trader-status";
+
+export function isTraderSentinel(
+  row: Pick<DemoOrder, "basket_id" | "ticker" | "client_order_id"> | null | undefined,
+): boolean {
+  if (!row) return false;
+  return (
+    row.basket_id === TRADER_STATUS_BASKET ||
+    row.client_order_id === TRADER_STATUS_CLIENT_ID ||
+    row.ticker === "_"
+  );
+}
+
+export function pickTraderStatus(rows: DemoOrder[]): DemoOrder | null {
+  return (
+    rows.find(isTraderSentinel) ??
+    rows.find((r) => r.status === "watching" || r.status === "no_edge") ??
+    null
+  );
+}
+
+export function realDemoOrders(rows: DemoOrder[], limit = 3): DemoOrder[] {
+  return rows.filter((r) => !isTraderSentinel(r)).slice(0, limit);
+}
 
 export type DemoOrder = {
   id: number;
@@ -212,8 +236,9 @@ function sanitizeSearch(q: string): string {
 
 
 export function traderSentence(row: DemoOrder | null): string {
-  if (!row || row.status === "off") return "Trader OFF";
-  if (row.status === "watching") return "Watching demo. No edge.";
+  // Only an explicit off, or a missing row that is not the heartbeat sentinel, is OFF.
+  if (row?.status === "off") return "Trader OFF";
+  if (!row) return "Trader OFF";
   if (row.status === "submitted" || row.status === "filled" || row.status === "cancelled") {
     const kind = row.kind || "basket";
     const event = row.event_ticker || "event";
@@ -222,7 +247,15 @@ export function traderSentence(row: DemoOrder | null): string {
   if (row.status === "rejected") {
     return `Demo rejected: ${row.reject_reason || "unknown"}`;
   }
-  if (row.status === "no_edge") return "Watching demo. No edge.";
+  if (
+    row.status === "watching" ||
+    row.status === "no_edge" ||
+    row.ticker === "_" ||
+    row.basket_id === TRADER_STATUS_BASKET ||
+    isTraderSentinel(row)
+  ) {
+    return "Trader on. Watching demo. No edge.";
+  }
   return "Trader OFF";
 }
 
@@ -338,7 +371,27 @@ export async function loadDashboard(
     .order("ts", { ascending: false })
     .limit(3);
   if (!demoRes.error) {
-    demoOrders = (demoRes.data ?? []) as DemoOrder[];
+    // Never count the heartbeat sentinel as a fill, even if the neq filter slips.
+    demoOrders = realDemoOrders((demoRes.data ?? []) as DemoOrder[], 3);
+  }
+
+  // If the dedicated status query errors or returns empty, recover from a
+  // watching / __trader__ / ticker "_" row instead of silently becoming OFF.
+  if (statusRes.error || !traderStatus || demoRes.error) {
+    const wideRes = await db
+      .from("demo_orders")
+      .select(DEMO_COLS)
+      .order("ts", { ascending: false })
+      .limit(12);
+    if (!wideRes.error) {
+      const wide = (wideRes.data ?? []) as DemoOrder[];
+      if (!traderStatus) {
+        traderStatus = pickTraderStatus(wide);
+      }
+      if (demoRes.error) {
+        demoOrders = realDemoOrders(wide, 3);
+      }
+    }
   }
 
   return { runs, latest, lastOk, stale, positions, snapshots, equity, equityUnreadable, snapshotCount, demoOrders, traderStatus };
