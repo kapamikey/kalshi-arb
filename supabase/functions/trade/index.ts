@@ -10,6 +10,13 @@ import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2";
 import { DEFAULT_SCAN_CONFIG, scanEvent, type ArbOpportunity } from "../scan/arb.ts";
 import { clientKey } from "../scan/paper.ts";
 import {
+  DEMO_LOT,
+  kalshiTakerFeeCents,
+  priceOpportunity,
+  type CosResult,
+  type PricedOpportunity,
+} from "../scan/fees.ts";
+import {
   TRADER_STATUS_BASKET,
   TRADER_STATUS_CLIENT_ID,
   createKalshiDemoClient,
@@ -19,7 +26,7 @@ import {
   type DemoKalshiClient,
 } from "./client.ts";
 
-const CONTRACTS = 1;
+const CONTRACTS = DEMO_LOT;
 
 // Boot-time kill-switch: production host or enabled-without-keys fails the isolate.
 readTradeEnv((k) => Deno.env.get(k));
@@ -39,6 +46,14 @@ type DemoOrderRow = {
   event_ticker: string | null;
   kind: string | null;
   client_order_id: string;
+  contracts: number;
+  price_cents: number | null;
+  fee_cents: number;
+  fee_multiplier: number | null;
+  fee_type: string | null;
+  realized_pnl_cents: number | null;
+  result: CosResult;
+  confidence: number | null;
 };
 
 function nowIso(): string {
@@ -66,6 +81,14 @@ async function upsertTraderStatus(
     event_ticker: row.event_ticker ?? null,
     kind: row.kind ?? null,
     client_order_id: TRADER_STATUS_CLIENT_ID,
+    contracts: CONTRACTS,
+    price_cents: null,
+    fee_cents: 0,
+    fee_multiplier: null,
+    fee_type: null,
+    realized_pnl_cents: null,
+    result: row.status === "rejected" ? "rejected" : "open",
+    confidence: null,
   };
   const { error } = await db.from("demo_orders").upsert(payload, {
     onConflict: "client_order_id",
@@ -112,7 +135,7 @@ async function alreadyWorked(db: SupabaseClient, basketId: string): Promise<bool
 async function placeBasket(
   db: SupabaseClient,
   client: DemoKalshiClient,
-  opp: ArbOpportunity,
+  opp: PricedOpportunity,
   ts: string,
 ): Promise<{ ok: boolean; reason?: string }> {
   const basketId = clientKey(opp);
@@ -121,6 +144,11 @@ async function placeBasket(
     const clientOrderId = await stableClientOrderId(
       `${basketId}|${leg.ticker}|${leg.side}|${leg.priceCents}|${CONTRACTS}`,
     );
+    const fee_cents = await kalshiTakerFeeCents(db, {
+      contracts: CONTRACTS,
+      price_cents: leg.priceCents,
+      fee_multiplier: leg.fee_multiplier,
+    });
     const attempted: DemoOrderRow = {
       basket_id: basketId,
       ticker: leg.ticker,
@@ -132,6 +160,14 @@ async function placeBasket(
       event_ticker: opp.eventTicker,
       kind: opp.kind,
       client_order_id: clientOrderId,
+      contracts: CONTRACTS,
+      price_cents: leg.priceCents,
+      fee_cents,
+      fee_multiplier: leg.fee_multiplier,
+      fee_type: leg.fee_type,
+      realized_pnl_cents: null,
+      result: "open",
+      confidence: opp.confidence,
     };
     await insertOrder(db, attempted);
 
@@ -169,6 +205,7 @@ async function placeBasket(
           await insertOrder(db, {
             ...attempted,
             status: "rejected",
+            result: "rejected",
             kalshi_order_id: json.order_id ?? null,
             reject_reason: `remainder cancel failed: ${message}`,
           });
@@ -180,6 +217,7 @@ async function placeBasket(
         await insertOrder(db, {
           ...attempted,
           status: "rejected",
+          result: "rejected",
           kalshi_order_id: json.order_id ?? null,
           reject_reason: reason,
         });
@@ -198,6 +236,7 @@ async function placeBasket(
     await insertOrder(db, {
       ...attempted,
       status: "rejected",
+      result: "rejected",
       kalshi_order_id: json.order_id ?? null,
       reject_reason: reason,
     });
@@ -261,7 +300,8 @@ async function run(): Promise<Response> {
       if (Date.now() - started > TIME_BUDGET_MS) break;
       if (await alreadyWorked(db, clientKey(opp))) continue;
       lastOpp = opp;
-      const result = await placeBasket(db, client, opp, ts);
+      const priced = await priceOpportunity(db, opp);
+      const result = await placeBasket(db, client, priced, ts);
       if (result.ok) {
         placed++;
         await upsertTraderStatus(db, {

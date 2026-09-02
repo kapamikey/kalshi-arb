@@ -14,8 +14,15 @@
 
 import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2";
 import { fetchMarketsByTickers, fetchOpenEvents, type KalshiEvent } from "./kalshi.ts";
-import { DEFAULT_SCAN_CONFIG, scanEvent, type ArbOpportunity, type ScanConfig } from "./arb.ts";
+import { DEFAULT_SCAN_CONFIG, scanEvent, type ScanConfig } from "./arb.ts";
 import { clientKey, settlePosition } from "./paper.ts";
+import {
+  DEMO_LOT,
+  confidenceFromEdge,
+  priceOpportunities,
+  settleResult,
+  type PricedOpportunity,
+} from "./fees.ts";
 
 const PAPER_STARTING_BANKROLL_CENTS = 100_000; // $1,000, matching existing paper rows
 
@@ -28,7 +35,8 @@ function config(): ScanConfig {
   return {
     ...DEFAULT_SCAN_CONFIG,
     minNetEdgeCents: envInt("MIN_NET_EDGE_CENTS", DEFAULT_SCAN_CONFIG.minNetEdgeCents),
-    contracts: envInt("CONTRACTS", DEFAULT_SCAN_CONFIG.contracts),
+    // Demo / CoS paper book is 1 lot per leg. Detection tests still use DEFAULT 20.
+    contracts: envInt("CONTRACTS", DEMO_LOT),
   };
 }
 
@@ -70,7 +78,7 @@ async function insertAll(db: SupabaseClient, table: string, rows: unknown[], siz
 async function settleOpenPositions(db: SupabaseClient, now: string): Promise<number> {
   const { data: open, error } = await db
     .from("paper_positions")
-    .select("id, legs, cost_cents, fee_cents")
+    .select("id, legs, cost_cents, fee_cents, locked_pnl_cents, confidence")
     .eq("status", "open");
   if (error) throw new Error(`select paper_positions: ${error.message}`);
   if (!open?.length) return 0;
@@ -91,9 +99,22 @@ async function settleOpenPositions(db: SupabaseClient, now: string): Promise<num
     if (legs.some((l) => !results.has(l.ticker))) continue;
 
     const { payout_cents, realized_pnl_cents } = settlePosition(pos, settledYes);
+    const result = settleResult(realized_pnl_cents);
+    const existing = typeof pos.confidence === "number" ? pos.confidence : null;
+    const confidence = existing ?? confidenceFromEdge(
+      Number(pos.locked_pnl_cents) || realized_pnl_cents,
+      Number(pos.fee_cents) || 0,
+    );
     const { error: upErr } = await db
       .from("paper_positions")
-      .update({ status: "settled", settled_ts: now, payout_cents, realized_pnl_cents })
+      .update({
+        status: "settled",
+        settled_ts: now,
+        payout_cents,
+        realized_pnl_cents,
+        result,
+        confidence,
+      })
       .eq("id", pos.id);
     if (upErr) throw new Error(`settle position ${pos.id}: ${upErr.message}`);
     settled++;
@@ -110,7 +131,7 @@ async function settleOpenPositions(db: SupabaseClient, now: string): Promise<num
  */
 async function openPaperPositions(
   db: SupabaseClient,
-  opportunities: ArbOpportunity[],
+  opportunities: PricedOpportunity[],
   now: string,
 ): Promise<number> {
   if (!opportunities.length) return 0;
@@ -122,13 +143,16 @@ async function openPaperPositions(
     series_ticker: o.seriesTicker,
     title: o.title,
     kind: o.kind,
+    // price_cents / fee_type / fee_multiplier live in legs jsonb (no those columns here)
     legs: o.legs,
-    contracts: o.contracts,
+    contracts: DEMO_LOT,
     cost_cents: o.costCents,
     fee_cents: o.feeCents,
     guaranteed_payout_cents: o.guaranteedPayoutCents,
     locked_pnl_cents: o.netEdgeCents,
     status: "open",
+    result: "open",
+    confidence: o.confidence,
     close_time: o.closeTime,
   }));
 
@@ -185,7 +209,8 @@ async function run(): Promise<Response> {
     const rows = snapshotRows(runId, events, nowIso);
     await insertAll(db, "market_snapshots", rows);
 
-    const opportunities = events.flatMap((e) => scanEvent(e, cfg));
+    const detected = events.flatMap((e) => scanEvent(e, cfg));
+    const opportunities = await priceOpportunities(db, detected, cfg.minNetEdgeCents);
     const opened = await openPaperPositions(db, opportunities, nowIso);
     const settled = await settleOpenPositions(db, nowIso);
     await writeEquityPoint(db, nowIso);

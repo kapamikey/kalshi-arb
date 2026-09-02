@@ -29,7 +29,7 @@ Viewer: https://kapamikey.github.io/kalshi-arb/
 - WebSocket `orderbook_delta` / always-on Fly worker
 - Scanning every demo event
 - Human vs Nerd restyle, extra tables/charts
-- Size 20 on the demo trader (`CONTRACTS=20` remains the *scanner* paper book)
+- Size 20 on the demo trader (demo + paper writers are 1 lot/leg)
 - `demo_fills` / `demo_baskets`
 - Live / production keys. Live money is a later spec, not a flag flip.
 
@@ -46,7 +46,7 @@ Set these as **Edge Function secrets** (Vault), not in the repo:
 | `KALSHI_API_BASE` | `https://external-api.demo.kalshi.co/trade-api/v2` | Allowlisted demo hosts only. Production hosts (`external-api.kalshi.com`, `api.elections.kalshi.com`) **crash on boot before any HTTP**. |
 | `KALSHI_DEMO_KEY_ID` | empty | Demo API Key ID from [demo.kalshi.co](https://demo.kalshi.co/). |
 | `KALSHI_DEMO_PRIVATE_KEY_PEM` | empty | Demo RSA private key PEM. `\n` escapes and base64-of-PEM are accepted. |
-| `DEMO_EVENT_CAP` | `20` | Max mutually-exclusive open demo events per run. |
+| `DEMO_EVENT_CAP` | `200` | Max mutually-exclusive open demo events per run. |
 | `MIN_NET_EDGE_CENTS` | `1` | Reused from `arb.ts`. Fee / overround math is not forked. |
 
 Empty keys:

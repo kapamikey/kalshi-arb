@@ -387,7 +387,7 @@ export default function App() {
 
       <section className="panel">
         <div className="section-h">
-          <h2>Latest-run snapshots</h2>
+          <h2>Latest snapshots</h2>
           <div className="row-actions">
             <input
               type="text"
@@ -405,7 +405,7 @@ export default function App() {
           </div>
         </div>
         <p className="muted" style={{ margin: "0 0 10px" }}>
-          Quote inspector for run {data.latest ? `#${data.latest.id}` : ready ? "—" : "…"}. Not a live blotter.
+          Quote inspector from market_snapshots_latest{data.latest ? ` (last scan #${data.latest.id})` : ""}. Not a live blotter.
           {ready && data.snapshotCount != null ? ` Showing ${data.snapshots.length} of ${data.snapshotCount}.` : null}
         </p>
         {!ready && data.snapshots.length === 0 ? (

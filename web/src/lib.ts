@@ -43,6 +43,8 @@ export type PaperPosition = {
   settled_ts: string | null;
   payout_cents: number | null;
   realized_pnl_cents: number | null;
+  result?: "win" | "loss" | "open" | "flat" | "rejected" | string | null;
+  confidence?: number | null;
 };
 
 export type MarketSnapshot = {
@@ -262,7 +264,7 @@ export async function loadDashboard(
   const posRes = await db
     .from("paper_positions")
     .select(
-      "id, client_key, opened_ts, event_ticker, series_ticker, title, kind, legs, contracts, cost_cents, fee_cents, guaranteed_payout_cents, locked_pnl_cents, status, close_time, settled_ts, payout_cents, realized_pnl_cents",
+      "id, client_key, opened_ts, event_ticker, series_ticker, title, kind, legs, contracts, cost_cents, fee_cents, guaranteed_payout_cents, locked_pnl_cents, status, close_time, settled_ts, payout_cents, realized_pnl_cents, result, confidence",
     )
     .order("opened_ts", { ascending: false })
     .limit(500);
@@ -285,30 +287,28 @@ export async function loadDashboard(
 
   let snapshots: MarketSnapshot[] = [];
   let snapshotCount: number | null = null;
-  if (latest) {
-    let q = db
-      .from("market_snapshots")
-      .select(
-        "id, run_id, ts, ticker, event_ticker, series_ticker, title, status, yes_bid, yes_ask, no_bid, no_ask, last_price, volume, open_interest, liquidity, close_time",
-        { count: "exact" },
-      )
-      .eq("run_id", latest.id)
-      .order("ticker", { ascending: true })
-      .limit(80);
+  // Peek the latest quote per ticker from the view, not the append-only history table.
+  let q = db
+    .from("market_snapshots_latest")
+    .select(
+      "id, run_id, ts, ticker, event_ticker, series_ticker, title, status, yes_bid, yes_ask, no_bid, no_ask, last_price, volume, open_interest, liquidity, close_time",
+      { count: "exact" },
+    )
+    .order("ticker", { ascending: true })
+    .limit(80);
 
-    if (opts.kxnfl) q = q.ilike("series_ticker", "KXNFL%");
-    const search = sanitizeSearch(opts.search);
-    if (search) {
-      q = q.or(
-        `ticker.ilike.%${search}%,event_ticker.ilike.%${search}%,series_ticker.ilike.%${search}%,title.ilike.%${search}%`,
-      );
-    }
-
-    const snapRes = await q;
-    if (snapRes.error) throw new Error(snapRes.error.message);
-    snapshots = (snapRes.data ?? []) as MarketSnapshot[];
-    snapshotCount = snapRes.count ?? snapshots.length;
+  if (opts.kxnfl) q = q.ilike("series_ticker", "KXNFL%");
+  const search = sanitizeSearch(opts.search);
+  if (search) {
+    q = q.or(
+      `ticker.ilike.%${search}%,event_ticker.ilike.%${search}%,series_ticker.ilike.%${search}%,title.ilike.%${search}%`,
+    );
   }
+
+  const snapRes = await q;
+  if (snapRes.error) throw new Error(snapRes.error.message);
+  snapshots = (snapRes.data ?? []) as MarketSnapshot[];
+  snapshotCount = snapRes.count ?? snapshots.length;
 
   const DEMO_COLS =
     "id, basket_id, ticker, side, status, kalshi_order_id, reject_reason, ts, event_ticker, kind, client_order_id";
