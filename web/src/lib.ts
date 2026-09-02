@@ -89,6 +89,32 @@ export type DemoOrder = {
   client_order_id: string | null;
 };
 
+export type TicketLeg = {
+  ticker: string;
+  side: "yes" | "no" | string;
+  ask_cents: number;
+  displayed_size: number | null;
+  label?: string;
+};
+
+export type Ticket = {
+  id: number;
+  event_ticker: string;
+  title: string | null;
+  kind: "overround" | "underround" | string;
+  legs: TicketLeg[] | unknown;
+  quoted_ts: string;
+  fee_cents: number;
+  net_edge_cents: number;
+  optimistic_pnl_cents: number;
+  conservative_pnl_cents: number | null;
+  status: "open" | "skipped" | "approved" | "expired" | string;
+  demo_order_ids: number[] | null;
+};
+
+export const TICKET_TTL_MS = 30_000;
+export const MIN_DISPLAYED_SIZE = 2;
+
 export type DashboardData = {
   runs: ScanRun[];
   latest: ScanRun | null;
@@ -100,6 +126,7 @@ export type DashboardData = {
   snapshotCount: number | null;
   demoOrders: DemoOrder[];
   traderStatus: DemoOrder | null;
+  tickets: Ticket[];
 };
 
 export function envAnonKey(): string {
@@ -240,6 +267,109 @@ export function demoOrderSentence(row: DemoOrder, now = Date.now()): string {
   return `${when}: ${side} ${row.ticker} — ${row.status}`;
 }
 
+
+export function asTicketLegs(raw: unknown): TicketLeg[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((l): l is TicketLeg => !!l && typeof l === "object" && "ticker" in l);
+}
+
+export function kindEnglish(kind: string): string {
+  if (kind === "underround") return "Buy every NO";
+  return "Buy every YES";
+}
+
+export function legsLine(legs: TicketLeg[]): string {
+  return legs
+    .map((l) => {
+      const side = l.side === "no" ? "NO" : "YES";
+      const name = l.label && l.label !== l.ticker ? l.label : l.ticker;
+      return `${side} ${name} @ ${l.ask_cents}¢`;
+    })
+    .join(" · ");
+}
+
+export function minDisplayedSize(legs: TicketLeg[]): number | null {
+  const sizes = legs.map((l) => l.displayed_size);
+  if (sizes.some((s) => s === null || s === undefined)) return null;
+  return Math.min(...(sizes as number[]));
+}
+
+export function quoteAgeMs(quotedTs: string, now = Date.now()): number {
+  const t = new Date(quotedTs).getTime();
+  if (!Number.isFinite(t)) return Number.POSITIVE_INFINITY;
+  return now - t;
+}
+
+export function quotedAgoLabel(quotedTs: string, now = Date.now()): string {
+  const ms = quoteAgeMs(quotedTs, now);
+  if (!Number.isFinite(ms)) return "Quoted ?s ago";
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  return `Quoted ${sec}s ago`;
+}
+
+export function ticketApproveBlocked(
+  ticket: Ticket,
+  now = Date.now(),
+): string | null {
+  if (ticket.status !== "open") return `status ${ticket.status}`;
+  if (quoteAgeMs(ticket.quoted_ts, now) > TICKET_TTL_MS) return "stale";
+  const legs = asTicketLegs(ticket.legs);
+  const min = minDisplayedSize(legs);
+  if (min === null) return "no depth";
+  if (min < MIN_DISPLAYED_SIZE) return "size < 2";
+  if (ticket.conservative_pnl_cents === null || ticket.conservative_pnl_cents <= 0) {
+    return "conservative ≤ 0";
+  }
+  if (ticket.optimistic_pnl_cents <= 0 || ticket.net_edge_cents <= 0) {
+    return "optimistic net ≤ 0";
+  }
+  return null;
+}
+
+export function pickOpenTicket(tickets: Ticket[], now = Date.now()): Ticket | null {
+  const open = tickets
+    .filter((t) => t.status === "open" && quoteAgeMs(t.quoted_ts, now) <= TICKET_TTL_MS)
+    .sort((a, b) => b.net_edge_cents - a.net_edge_cents);
+  return open[0] ?? null;
+}
+
+export function feesNearPeak(legs: TicketLeg[]): boolean {
+  return legs.some((l) => l.ask_cents >= 40 && l.ask_cents <= 60);
+}
+
+export async function postTicketAction(
+  url: string,
+  anonKey: string,
+  ticketId: number,
+  action: "skip" | "approve",
+): Promise<{ ok: boolean; error?: string; fill?: string; locked_arb?: boolean; note?: string }> {
+  const res = await fetch(`${url.replace(/\/+$/, "")}/functions/v1/approve`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${anonKey}`,
+      apikey: anonKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ ticket_id: ticketId, action }),
+  });
+  const json = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    error?: string;
+    fill?: string;
+    locked_arb?: boolean;
+    note?: string;
+  };
+  if (!res.ok || json.ok === false) {
+    return { ok: false, error: json.error || `HTTP ${res.status}` };
+  }
+  return {
+    ok: true,
+    fill: json.fill,
+    locked_arb: json.locked_arb,
+    note: json.note,
+  };
+}
+
 export async function loadDashboard(
   db: SupabaseClient,
   opts: { search: string; kxnfl: boolean },
@@ -334,5 +464,70 @@ export async function loadDashboard(
     demoOrders = (demoRes.data ?? []) as DemoOrder[];
   }
 
-  return { runs, latest, lastOk, stale, positions, snapshots, equity, snapshotCount, demoOrders, traderStatus };
+  let tickets: Ticket[] = [];
+  const tickRes = await db
+    .from("tickets")
+    .select(
+      "id, event_ticker, title, kind, legs, quoted_ts, fee_cents, net_edge_cents, optimistic_pnl_cents, conservative_pnl_cents, status, demo_order_ids",
+    )
+    .eq("status", "open")
+    .order("net_edge_cents", { ascending: false })
+    .limit(20);
+  if (!tickRes.error) {
+    tickets = (tickRes.data ?? []) as Ticket[];
+  }
+
+  return { runs, latest, lastOk, stale, positions, snapshots, equity, snapshotCount, demoOrders, traderStatus, tickets };
+}
+
+export type ApproveResult = {
+  ok: boolean;
+  action?: string;
+  status?: string;
+  fill?: "filled" | "rejected" | "partial";
+  locked_arb?: boolean;
+  error?: string;
+  note?: string;
+  missing_env?: string[];
+};
+
+export function ticketApproveOk(ticket: Ticket, now = Date.now()): boolean {
+  return ticketApproveBlocked(ticket, now) === null;
+}
+
+export function feesPeakNote(legs: TicketLeg[]): boolean {
+  return feesNearPeak(legs);
+}
+
+export async function loadOpenTicket(db: SupabaseClient): Promise<Ticket | null> {
+  const res = await db
+    .from("tickets")
+    .select(
+      "id, event_ticker, title, kind, legs, quoted_ts, fee_cents, net_edge_cents, optimistic_pnl_cents, conservative_pnl_cents, status, demo_order_ids",
+    )
+    .eq("status", "open")
+    .order("quoted_ts", { ascending: false })
+    .order("net_edge_cents", { ascending: false })
+    .limit(8);
+  if (res.error) throw new Error(res.error.message);
+  const rows = (res.data ?? []) as Ticket[];
+  const now = Date.now();
+  return rows.find((t) => quoteAgeMs(t.quoted_ts, now) <= TICKET_TTL_MS) ?? null;
+}
+
+export async function callTicketAction(
+  url: string,
+  anonKey: string,
+  ticketId: number,
+  action: "skip" | "approve",
+): Promise<ApproveResult> {
+  const r = await postTicketAction(url, anonKey, ticketId, action);
+  return {
+    ok: r.ok,
+    error: r.error,
+    fill: r.fill as ApproveResult["fill"],
+    locked_arb: r.locked_arb,
+    note: r.note,
+    action,
+  };
 }

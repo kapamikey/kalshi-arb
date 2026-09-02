@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   activeAnonKey,
   ago,
   asLegs,
+  asTicketLegs,
+  callTicketAction,
   classifyError,
   clearStoredAnonKey,
   demoOrderSentence,
@@ -10,14 +12,23 @@ import {
   dollarsFromCents,
   envAnonKey,
   envUrl,
+  feesPeakNote,
   fmtNy,
+  kindEnglish,
+  legsLine,
   loadDashboard,
+  loadOpenTicket,
   makeClient,
+  minDisplayedSize,
+  quoteAgeMs,
   saveAnonKey,
+  ticketApproveOk,
   traderSentence,
+  type ApproveResult,
   type DashboardData,
   type LoadErrorKind,
   type PaperPosition,
+  type Ticket,
 } from "./lib";
 
 type StatusFilter = "all" | "open" | "settled";
@@ -33,6 +44,7 @@ const emptyData: DashboardData = {
   snapshotCount: null,
   demoOrders: [],
   traderStatus: null,
+  tickets: [],
 };
 
 function pnlClass(cents: number | null | undefined): string {
@@ -40,6 +52,193 @@ function pnlClass(cents: number | null | undefined): string {
   if (cents > 0) return "num pos";
   if (cents < 0) return "num neg";
   return "num";
+}
+
+
+function TicketDesk({
+  url,
+  anonKey,
+}: {
+  url: string;
+  anonKey: string;
+}) {
+  const skipRef = useRef<HTMLButtonElement>(null);
+  const [ticket, setTicket] = useState<Ticket | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"skip" | "approve" | null>(null);
+  const [result, setResult] = useState<ApproveResult | null>(null);
+  const [now, setNow] = useState(Date.now());
+
+  const reload = useCallback(async () => {
+    if (!anonKey) return;
+    setLoading(true);
+    try {
+      const next = await loadOpenTicket(makeClient(url, anonKey));
+      setTicket(next);
+      if (next) setResult(null);
+      setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setTicket(null);
+    } finally {
+      setLoading(false);
+      setNow(Date.now());
+    }
+  }, [url, anonKey]);
+
+  useEffect(() => {
+    void reload();
+    const t = window.setInterval(() => void reload(), 5_000);
+    return () => window.clearInterval(t);
+  }, [reload]);
+
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    skipRef.current?.focus();
+  }, [ticket?.id]);
+
+  const legs = ticket ? asTicketLegs(ticket.legs) : [];
+  const minSize = ticket ? minDisplayedSize(legs) : null;
+  const ageMs = ticket ? quoteAgeMs(ticket.quoted_ts, now) : 0;
+  const ageSec = Math.max(0, Math.round(ageMs / 1000));
+  const depthUnknown = !!ticket && minSize === null;
+  const sizeOne = minSize !== null && minSize < 2;
+  const canApprove = ticket ? ticketApproveOk(ticket, now) && !busy : false;
+
+  async function act(action: "skip" | "approve") {
+    if (!ticket || !anonKey) return;
+    setBusy(action);
+    try {
+      const res = await callTicketAction(url, anonKey, ticket.id, action);
+      setResult(res);
+      if (res.ok) {
+        if (action === "skip") {
+          setTicket(null);
+          setResult(null);
+        }
+        await reload();
+      }
+    } finally {
+      setBusy(null);
+      skipRef.current?.focus();
+    }
+  }
+
+  return (
+    <section className="desk">
+      <div className="desk-head">
+        <span className="pill demo">DEMO PAPER</span>
+        <span className="clv-strip">CLV: waiting for close</span>
+      </div>
+
+      {!anonKey && (
+        <p className="muted">Paste the anon key below in Details to load tickets.</p>
+      )}
+
+      {anonKey && !ticket && !loading && (
+        <p className="empty-desk">Nothing to decide. Watching production books.</p>
+      )}
+      {anonKey && !ticket && loading && (
+        <p className="empty-desk muted">Watching production books…</p>
+      )}
+
+      {ticket && (
+        <div className="ticket">
+          <h1 className="ticket-title">{ticket.title || ticket.event_ticker}</h1>
+          <p className="mono muted">{ticket.event_ticker}</p>
+          <p className="kind-line">{kindEnglish(ticket.kind)}</p>
+          <p className="legs-line">{legsLine(legs)}</p>
+
+          <div className="hero">
+            <div className="k">Net after taker fees</div>
+            <div className={`hero-num ${ticket.net_edge_cents > 0 ? "pos" : "neg"}`}>
+              {dollarsFromCents(ticket.net_edge_cents)}
+            </div>
+          </div>
+          <p className="fees-line">
+            Fees {dollarsFromCents(ticket.fee_cents)}
+            {feesPeakNote(legs) ? " · peak near 50¢" : ""}
+          </p>
+
+          <p className="meta-line">
+            {depthUnknown
+              ? "Depth unknown"
+              : `Depth min size at ask: ${minSize}`}
+            {sizeOne ? " · size 1, conservative unfilled" : ""}
+          </p>
+          <p className="meta-line">Quoted {ageSec}s ago</p>
+
+          <div className="pnl-pair">
+            <div>
+              <div className="k">Optimistic (touch)</div>
+              <div className={ticket.optimistic_pnl_cents > 0 ? "pos num" : "num"}>
+                {dollarsFromCents(ticket.optimistic_pnl_cents)}
+              </div>
+            </div>
+            <div>
+              <div className="k">Conservative (tick worse / no cushion)</div>
+              <div className="num">
+                {ticket.conservative_pnl_cents === null || sizeOne
+                  ? "$0 / n/a"
+                  : dollarsFromCents(ticket.conservative_pnl_cents)}
+              </div>
+            </div>
+          </div>
+          <p className="maker-copy">
+            Assumes taker (crossing the spread). Resting maker is not this screen.
+          </p>
+
+          <form
+            className="desk-actions"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void act("skip");
+            }}
+          >
+            <button
+              ref={skipRef}
+              type="submit"
+              className="primary"
+              disabled={!!busy}
+            >
+              {busy === "skip" ? "Skipping…" : "Skip"}
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              disabled={!canApprove}
+              onClick={() => void act("approve")}
+            >
+              {busy === "approve" ? "Sending…" : "Approve demo paper"}
+            </button>
+          </form>
+
+        </div>
+      )}
+      {result && result.action === "approve" && (
+        <p className={`fill-result ${result.fill === "partial" ? "warn" : ""}`}>
+          {result.ok
+            ? result.fill === "partial"
+              ? "Partial — inventory, not a locked arb."
+              : result.fill === "filled"
+                ? "Filled."
+                : result.fill === "rejected"
+                  ? "Rejected."
+                  : "Sent."
+            : `Not sent: ${result.error || "failed"}`}
+        </p>
+      )}
+      {result && !result.ok && result.action !== "approve" && (
+        <p className="err-text">{result.error}</p>
+      )}
+      {err && <p className="err-text">{err}</p>}
+    </section>
+  );
 }
 
 export default function App() {
@@ -143,6 +342,10 @@ export default function App() {
 
   return (
     <div className="app">
+      <TicketDesk url={url} anonKey={anonKey} />
+
+      <details className="fold">
+        <summary>Details</summary>
       <section className="demo-strip">
         <div className="demo-head">
           <span className="pill demo">DEMO PAPER</span>
@@ -444,6 +647,7 @@ export default function App() {
           </div>
         )}
       </section>
+      </details>
     </div>
   );
 }
