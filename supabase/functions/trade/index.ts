@@ -16,7 +16,7 @@ import {
   type CosResult,
   type PricedOpportunity,
 } from "../scan/fees.ts";
-import { insertOpportunities, opportunityRow, type OpportunityRow } from "../scan/opportunities.ts";
+import { emptyBookSkippedRow, insertOpportunities, opportunityRow, type OpportunityRow } from "../scan/opportunities.ts";
 import {
   TRADER_STATUS_BASKET,
   TRADER_STATUS_CLIENT_ID,
@@ -286,6 +286,7 @@ async function run(): Promise<Response> {
     const opportunities = await priceAllOpportunities(db, detected);
 
     if (!opportunities.length) {
+      await insertOpportunities(db, [emptyBookSkippedRow({ events: events.length })]);
       await upsertTraderStatus(db, { status: "watching", ts });
       return Response.json({
         ok: true,

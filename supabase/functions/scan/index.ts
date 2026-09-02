@@ -23,7 +23,7 @@ import {
   settleResult,
   type PricedOpportunity,
 } from "./fees.ts";
-import { insertOpportunities, opportunityRow } from "./opportunities.ts";
+import { emptyBookSkippedRow, insertOpportunities, opportunityRow } from "./opportunities.ts";
 
 const PAPER_STARTING_BANKROLL_CENTS = 100_000; // $1,000, matching existing paper rows
 
@@ -218,29 +218,33 @@ async function run(): Promise<Response> {
     const priced = await priceAllOpportunities(db, detected);
     const takeable = priced.filter((o) => o.netEdgeCents >= cfg.minNetEdgeCents);
     const openedIds = await openPaperPositions(db, takeable, nowIso);
-    await insertOpportunities(
-      db,
-      priced.map((o) => {
-        const paperId = openedIds.get(clientKey(o));
-        if (paperId != null) {
+    if (priced.length === 0) {
+      await insertOpportunities(db, [emptyBookSkippedRow({ runId, events: events.length })]);
+    } else {
+      await insertOpportunities(
+        db,
+        priced.map((o) => {
+          const paperId = openedIds.get(clientKey(o));
+          if (paperId != null) {
+            return opportunityRow({
+              opp: o,
+              runId,
+              decision: "taken",
+              reason: "paper 1 lot",
+              paperPositionId: paperId,
+            });
+          }
           return opportunityRow({
             opp: o,
             runId,
-            decision: "taken",
-            reason: "paper 1 lot",
-            paperPositionId: paperId,
+            decision: "skipped",
+            reason: o.netEdgeCents < cfg.minNetEdgeCents
+              ? "below min net edge after fees"
+              : "already open",
           });
-        }
-        return opportunityRow({
-          opp: o,
-          runId,
-          decision: "skipped",
-          reason: o.netEdgeCents < cfg.minNetEdgeCents
-            ? "below min net edge after fees"
-            : "already open",
-        });
-      }),
-    );
+        }),
+      );
+    }
     const opened = openedIds.size;
     const opportunities = takeable;
     const settled = await settleOpenPositions(db, nowIso);
