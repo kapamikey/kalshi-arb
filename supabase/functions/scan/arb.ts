@@ -91,9 +91,12 @@ export const DEFAULT_SCAN_CONFIG: ScanConfig = {
   contracts: 20,
 };
 
-/** A price of 0 or 100 means "no resting offer", not a free contract. */
+/** A price of 0 or 100 means "no resting offer", not a free contract.
+ *  Asks must be integer cents. Un-normalized dollar floats (0.45) would
+ *  otherwise look tradable and then corrupt fee/cost math. */
 function tradableAsk(ask: number | null | undefined): number | null {
   if (ask === null || ask === undefined || ask <= 0 || ask >= 100) return null;
+  if (!Number.isInteger(ask)) return null;
   return ask;
 }
 

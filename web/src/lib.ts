@@ -99,6 +99,8 @@ export type DashboardData = {
   positions: PaperPosition[];
   snapshots: MarketSnapshot[];
   equity: PaperEquity | null;
+  /** True when the portfolio_snapshots read failed (RLS/permission), not when it is empty. */
+  equityUnreadable: boolean;
   snapshotCount: number | null;
   demoOrders: DemoOrder[];
   traderStatus: DemoOrder | null;
@@ -273,6 +275,7 @@ export async function loadDashboard(
   const positions = (posRes.data ?? []) as PaperPosition[];
 
   let equity: PaperEquity | null = null;
+  let equityUnreadable = false;
   const eqRes = await db
     .from("portfolio_snapshots")
     .select("ts, account_value, paper")
@@ -280,7 +283,11 @@ export async function loadDashboard(
     .order("ts", { ascending: false })
     .limit(1);
 
-  if (!eqRes.error && eqRes.data && eqRes.data.length > 0) {
+  if (eqRes.error) {
+    // Do not invent a $1000 default. Surface "unreadable" so a failed
+    // SELECT is not the same as "no paper row" (issue #3 vs #7).
+    equityUnreadable = true;
+  } else if (eqRes.data && eqRes.data.length > 0) {
     const row = eqRes.data[0] as { ts: string; account_value: number };
     equity = { ts: row.ts, account_value: row.account_value, source: "portfolio_snapshots" };
   }
@@ -334,5 +341,5 @@ export async function loadDashboard(
     demoOrders = (demoRes.data ?? []) as DemoOrder[];
   }
 
-  return { runs, latest, lastOk, stale, positions, snapshots, equity, snapshotCount, demoOrders, traderStatus };
+  return { runs, latest, lastOk, stale, positions, snapshots, equity, equityUnreadable, snapshotCount, demoOrders, traderStatus };
 }

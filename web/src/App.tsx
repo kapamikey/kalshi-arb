@@ -30,6 +30,7 @@ const emptyData: DashboardData = {
   positions: [],
   snapshots: [],
   equity: null,
+  equityUnreadable: false,
   snapshotCount: null,
   demoOrders: [],
   traderStatus: null,
@@ -295,6 +296,13 @@ export default function App() {
             Latest paper portfolio_snapshots · {fmtNy(data.equity.ts)}
           </p>
         )}
+        {!data.equity && data.equityUnreadable && data.latest?.ok && (
+          <p className="err-text" style={{ margin: "8px 0 0" }}>
+            portfolio_snapshots is unreadable. Apply{" "}
+            <code>supabase/migrations/20260831_paper_equity_read.sql</code> so anon
+            can SELECT paper=true rows.
+          </p>
+        )}
       </section>
 
       <section className="panel">
@@ -405,7 +413,7 @@ export default function App() {
           </div>
         </div>
         <p className="muted" style={{ margin: "0 0 10px" }}>
-          Quote inspector from market_snapshots_latest{data.latest ? ` (last scan #${data.latest.id})` : ""}. Not a live blotter.
+          Quote inspector from market_snapshots_latest{data.latest ? ` (last scan #${data.latest.id})` : ready ? " —" : " …"}. Not a live blotter.
           {ready && data.snapshotCount != null ? ` Showing ${data.snapshots.length} of ${data.snapshotCount}.` : null}
         </p>
         {!ready && data.snapshots.length === 0 ? (
