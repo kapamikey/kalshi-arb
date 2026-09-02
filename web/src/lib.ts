@@ -1,6 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-export const DEFAULT_SUPABASE_URL = "https://axdikbsghdotugnotzof.supabase.co";
+export const DEFAULT_SUPABASE_URL = "https://tymnlqhakjnqwxcainwx.supabase.co";
 export const STALE_AFTER_MS = 10 * 60 * 1000;
 const STORAGE_KEY = "kalshi-arb-dashboard-anon";
 

@@ -154,7 +154,14 @@ async function writeEquityPoint(db: SupabaseClient, ts: string) {
     account_value: (PAPER_STARTING_BANKROLL_CENTS + realised) / 100,
     paper: true,
   });
-  if (insErr) throw new Error(`insert portfolio_snapshots: ${insErr.message}`);
+  if (insErr) {
+    const msg = insErr.message ?? '';
+    if (/portfolio_snapshots|schema cache|does not exist/i.test(msg)) {
+      console.warn(`skip equity point: ${msg}`);
+      return;
+    }
+    throw new Error(`insert portfolio_snapshots: ${msg}`);
+  }
 }
 
 async function run(): Promise<Response> {

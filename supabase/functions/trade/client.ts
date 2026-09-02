@@ -152,7 +152,7 @@ export function readTradeEnv(get: EnvGetter): TradeEnv {
   const privateKeyPem = normalizePem(
     get("KALSHI_DEMO_PRIVATE_KEY_PEM") || get("KALSHI_PRIVATE_KEY") || "",
   );
-  const eventCap = Math.max(1, Math.min(envInt(get, "DEMO_EVENT_CAP", 20), 50));
+  const eventCap = Math.max(1, Math.min(envInt(get, "DEMO_EVENT_CAP", 200), 200));
 
   if (tradingEnabled && (!apiKeyId || !privateKeyPem)) {
     throw new Error(
