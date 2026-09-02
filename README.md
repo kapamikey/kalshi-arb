@@ -9,6 +9,17 @@ on boot if a production Trade API host is configured.
 
 Viewer: https://kapamikey.github.io/kalshi-arb/
 
+## Ticket desk (this PR)
+
+One screen over **production** orderbooks (public host `api.elections.kalshi.com`, same as `scan/kalshi.ts`). Demo is order plumbing only.
+
+- `trade` 30s cron **refreshes `tickets` only**. It never `POST`s Kalshi. `CRON_POSTS_ORDERS = false`.
+- Cap ~20 mutually-exclusive events, orderbook size, cron budget <55s. Skip `flat` fees and perps.
+- Open tickets require optimistic net after fees > 0, conservative P&L > 0 (1 lot at ask+1¢, size ≥ 2), depth known.
+- Expire `quoted_ts` older than 30s. Intra-market YES+NO is never a ticket. 49+49 is not a ticket.
+- Human **Skip** / **Approve demo paper** hit the `approve` Edge Function (`verify_jwt=true`). 1 lot/leg, FOK, demo allowlist. Partial ≠ locked arb.
+- Do **not** set `KALSHI_TRADING_ENABLED=true`. Approve may use `KALSHI_DEMO_KEY_ID` + `KALSHI_DEMO_PRIVATE_KEY_PEM` at click time. Cron never POSTs.
+
 ## Friday 9/4 cut vs next week
 
 **This week (must ship Friday 2026-09-04)**
@@ -18,10 +29,9 @@ Viewer: https://kapamikey.github.io/kalshi-arb/
   (alias `https://demo-api.kalshi.co/trade-api/v2`).
 - RSA-PSS SHA256 signer (`timestamp + METHOD + path`, no query string).
 - `demo_orders` table + anon SELECT. 1 contract per leg.
-- `trade` Edge Function on a **30-second** cron against ~20 open mutually-exclusive
-  **demo** events. Detect and execute on demo books. `POST /portfolio/events/orders`
-  with `client_order_id` idempotency and `fill_or_kill` (no GTC).
-- Thin `DEMO PAPER` strip on the existing `web/` dashboard.
+- `trade` Edge Function on a **30-second** cron: production books → `tickets`. **Does not POST.**
+- `approve` function places demo FOK orders only after a human click.
+- One-screen Ticket Desk on `web/` (`DEMO PAPER`). Old dashboard behind Details.
 - Testing cash only. No live money.
 
 **Not this week**
@@ -175,8 +185,10 @@ supabase/functions/scan/index.ts   5-min public scanner (no Kalshi credentials)
 supabase/functions/scan/arb.ts     Fee curve + basket detection (shared)
 supabase/functions/scan/kalshi.ts  Read-only production market data
 supabase/functions/scan/paper.ts   Local paper ledger identity + settlement
-supabase/functions/trade/index.ts  30s demo trader
+supabase/functions/trade/index.ts  30s ticket refresh (no POST)
+supabase/functions/trade/tickets.ts Dual P&L + open-ticket gates
 supabase/functions/trade/client.ts Demo allowlist + RSA-PSS signer
+supabase/functions/approve/index.ts Human skip/approve (demo FOK)
 supabase/migrations/               Schema + cron schedules
 tests/arb.test.ts                  Offline tests for the math
 tests/demo-client.test.ts          Production-host crash + signer
@@ -188,8 +200,7 @@ web/                               Dashboard (Vite + React) + DEMO PAPER strip
 ## Tests
 
 ```bash
-bun test tests/arb.test.ts
-bun test tests/demo-client.test.ts
+bun test tests/arb.test.ts tests/demo-client.test.ts tests/ticket-desk.test.ts
 ```
 
 Pure math also runs under Node's type stripping:
@@ -205,6 +216,7 @@ supabase link --project-ref axdikbsghdotugnotzof
 supabase db push
 supabase functions deploy scan
 supabase functions deploy trade
+supabase functions deploy approve
 ```
 
 Then set Vault secrets (above) and confirm both cron jobs.
