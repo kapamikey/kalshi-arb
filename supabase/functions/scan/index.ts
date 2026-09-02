@@ -8,10 +8,8 @@
  *   4. opens paper positions for baskets clearing the edge threshold,
  *   5. settles paper positions whose markets have resolved,
  *   6. writes an equity point to portfolio_snapshots (paper = true).
- *   7. POSTs the `trade` function once (same Bearer as cron). Trade errors
- *      are logged and never fail the scan.
  *
- * Scan itself never authenticates to Kalshi and never places an order.
+ * It never authenticates to Kalshi and never places an order.
  */
 
 import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2";
@@ -21,46 +19,13 @@ import { clientKey, settlePosition } from "./paper.ts";
 import {
   DEMO_LOT,
   confidenceFromEdge,
-  priceOpportunities,
+  priceAllOpportunities,
   settleResult,
   type PricedOpportunity,
 } from "./fees.ts";
+import { insertOpportunities, opportunityRow } from "./opportunities.ts";
 
 const PAPER_STARTING_BANKROLL_CENTS = 100_000; // $1,000, matching existing paper rows
-const TRADE_TIMEOUT_MS = 50_000;
-
-/** One demo trade after this scan. Never throws; never logs secrets. */
-async function invokeTradeOnce(): Promise<unknown> {
-  const base = (Deno.env.get("SUPABASE_URL") ?? "").replace(/\/+$/, "");
-  const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-  if (!base || !key) {
-    console.warn("skip trade invoke: missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-    return { ok: false, error: "missing supabase url or service role" };
-  }
-  const url = `${base}/functions/v1/trade`;
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${key}`,
-      },
-      signal: AbortSignal.timeout(TRADE_TIMEOUT_MS),
-    });
-    const bodyText = await res.text();
-    console.log(`trade invoke status=${res.status} body=${bodyText.slice(0, 2000)}`);
-    try {
-      return JSON.parse(bodyText);
-    } catch {
-      return { ok: false, error: `trade HTTP ${res.status} non-json` };
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn(`trade invoke failed: ${message}`);
-    return { ok: false, error: message };
-  }
-}
-
 
 function envInt(name: string, fallback: number): number {
   const n = Number.parseInt(Deno.env.get(name) ?? "", 10);
@@ -169,8 +134,9 @@ async function openPaperPositions(
   db: SupabaseClient,
   opportunities: PricedOpportunity[],
   now: string,
-): Promise<number> {
-  if (!opportunities.length) return 0;
+): Promise<Map<string, number>> {
+  const ids = new Map<string, number>();
+  if (!opportunities.length) return ids;
 
   const rows = opportunities.map((o) => ({
     client_key: clientKey(o),
@@ -195,9 +161,12 @@ async function openPaperPositions(
   const { data, error } = await db
     .from("paper_positions")
     .upsert(rows, { onConflict: "client_key", ignoreDuplicates: true })
-    .select("id");
+    .select("id, client_key");
   if (error) throw new Error(`insert paper_positions: ${error.message}`);
-  return data?.length ?? 0;
+  for (const row of data ?? []) {
+    ids.set(row.client_key as string, row.id as number);
+  }
+  return ids;
 }
 
 /** Equity = starting bankroll + realised P&L. Unsettled baskets are not marked to market. */
@@ -246,8 +215,34 @@ async function run(): Promise<Response> {
     await insertAll(db, "market_snapshots", rows);
 
     const detected = events.flatMap((e) => scanEvent(e, cfg));
-    const opportunities = await priceOpportunities(db, detected, cfg.minNetEdgeCents);
-    const opened = await openPaperPositions(db, opportunities, nowIso);
+    const priced = await priceAllOpportunities(db, detected);
+    const takeable = priced.filter((o) => o.netEdgeCents >= cfg.minNetEdgeCents);
+    const openedIds = await openPaperPositions(db, takeable, nowIso);
+    await insertOpportunities(
+      db,
+      priced.map((o) => {
+        const paperId = openedIds.get(clientKey(o));
+        if (paperId != null) {
+          return opportunityRow({
+            opp: o,
+            runId,
+            decision: "taken",
+            reason: "paper 1 lot",
+            paperPositionId: paperId,
+          });
+        }
+        return opportunityRow({
+          opp: o,
+          runId,
+          decision: "skipped",
+          reason: o.netEdgeCents < cfg.minNetEdgeCents
+            ? "below min net edge after fees"
+            : "already open",
+        });
+      }),
+    );
+    const opened = openedIds.size;
+    const opportunities = takeable;
     const settled = await settleOpenPositions(db, nowIso);
     await writeEquityPoint(db, nowIso);
 
@@ -263,15 +258,13 @@ async function run(): Promise<Response> {
       ok: true,
     };
     await db.from("scan_runs").update(summary).eq("id", runId);
-    const trade = await invokeTradeOnce();
-    return Response.json({ run_id: runId, ...summary, trade });
+    return Response.json({ run_id: runId, ...summary });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await db.from("scan_runs")
       .update({ ok: false, error: message, duration_ms: Date.now() - started })
       .eq("id", runId);
-    const trade = await invokeTradeOnce();
-    return Response.json({ ok: false, run_id: runId, error: message, trade }, { status: 500 });
+    return Response.json({ ok: false, run_id: runId, error: message }, { status: 500 });
   }
 }
 

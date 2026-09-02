@@ -171,10 +171,9 @@ export async function priceOpportunity(
   };
 }
 
-export async function priceOpportunities(
+export async function priceAllOpportunities(
   db: FeeRpc,
   opps: ArbOpportunity[],
-  minNetEdgeCents: number,
 ): Promise<PricedOpportunity[]> {
   const seriesCache = new Map<string, SeriesFee>();
   const out: PricedOpportunity[] = [];
@@ -185,8 +184,16 @@ export async function priceOpportunities(
       fee = await fetchSeriesFee(key);
       seriesCache.set(key, fee);
     }
-    const priced = await priceOpportunity(db, opp, fee);
-    if (priced.netEdgeCents >= minNetEdgeCents) out.push(priced);
+    out.push(await priceOpportunity(db, opp, fee));
   }
   return out;
+}
+
+export async function priceOpportunities(
+  db: FeeRpc,
+  opps: ArbOpportunity[],
+  minNetEdgeCents: number,
+): Promise<PricedOpportunity[]> {
+  const all = await priceAllOpportunities(db, opps);
+  return all.filter((p) => p.netEdgeCents >= minNetEdgeCents);
 }

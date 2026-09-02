@@ -12,10 +12,11 @@ import { clientKey } from "../scan/paper.ts";
 import {
   DEMO_LOT,
   kalshiTakerFeeCents,
-  priceOpportunity,
+  priceAllOpportunities,
   type CosResult,
   type PricedOpportunity,
 } from "../scan/fees.ts";
+import { insertOpportunities, opportunityRow, type OpportunityRow } from "../scan/opportunities.ts";
 import {
   TRADER_STATUS_BASKET,
   TRADER_STATUS_CLIENT_ID,
@@ -96,11 +97,12 @@ async function upsertTraderStatus(
   if (error) throw new Error(`upsert demo trader status: ${error.message}`);
 }
 
-async function insertOrder(db: SupabaseClient, row: DemoOrderRow) {
-  const { error } = await db.from("demo_orders").upsert(row, {
+async function insertOrder(db: SupabaseClient, row: DemoOrderRow): Promise<number | null> {
+  const { data, error } = await db.from("demo_orders").upsert(row, {
     onConflict: "client_order_id",
-  });
+  }).select("id").single();
   if (error) throw new Error(`upsert demo_orders: ${error.message}`);
+  return (data?.id as number | undefined) ?? null;
 }
 
 function rejectText(
@@ -137,8 +139,9 @@ async function placeBasket(
   client: DemoKalshiClient,
   opp: PricedOpportunity,
   ts: string,
-): Promise<{ ok: boolean; reason?: string }> {
+): Promise<{ ok: boolean; reason?: string; demoOrderId: number | null }> {
   const basketId = clientKey(opp);
+  let demoOrderId: number | null = null;
 
   for (const leg of opp.legs) {
     const clientOrderId = await stableClientOrderId(
@@ -169,7 +172,8 @@ async function placeBasket(
       result: "open",
       confidence: opp.confidence,
     };
-    await insertOrder(db, attempted);
+    const attemptedId = await insertOrder(db, attempted);
+    if (demoOrderId == null) demoOrderId = attemptedId;
 
     const body = eventOrderBody(
       { ticker: leg.ticker, side: leg.side, priceCents: leg.priceCents },
@@ -209,7 +213,7 @@ async function placeBasket(
             kalshi_order_id: json.order_id ?? null,
             reject_reason: `remainder cancel failed: ${message}`,
           });
-          return { ok: false, reason: `remainder cancel failed: ${message}` };
+          return { ok: false, reason: `remainder cancel failed: ${message}`, demoOrderId };
         }
       }
       if (filled <= 0) {
@@ -221,7 +225,7 @@ async function placeBasket(
           kalshi_order_id: json.order_id ?? null,
           reject_reason: reason,
         });
-        return { ok: false, reason };
+        return { ok: false, reason, demoOrderId };
       }
       await insertOrder(db, {
         ...attempted,
@@ -240,10 +244,10 @@ async function placeBasket(
       kalshi_order_id: json.order_id ?? null,
       reject_reason: reason,
     });
-    return { ok: false, reason };
+    return { ok: false, reason, demoOrderId };
   }
 
-  return { ok: true };
+  return { ok: true, demoOrderId };
 }
 
 async function run(): Promise<Response> {
@@ -276,9 +280,10 @@ async function run(): Promise<Response> {
   try {
     const events = await client.fetchCappedExclusiveEvents(env.eventCap);
     const cfg = { ...DEFAULT_SCAN_CONFIG, contracts: CONTRACTS };
-    const opportunities = events
+    const detected = events
       .flatMap((e) => scanEvent(e, cfg))
       .sort((a, b) => b.netEdgeCents - a.netEdgeCents);
+    const opportunities = await priceAllOpportunities(db, detected);
 
     if (!opportunities.length) {
       await upsertTraderStatus(db, { status: "watching", ts });
@@ -295,24 +300,68 @@ async function run(): Promise<Response> {
     let placed = 0;
     let lastReject: string | undefined;
     let lastOpp: ArbOpportunity | undefined;
+    let attempted = false;
+    const ledger: OpportunityRow[] = [];
 
     for (const opp of opportunities) {
-      if (Date.now() - started > TIME_BUDGET_MS) break;
-      if (await alreadyWorked(db, clientKey(opp))) continue;
+      if (await alreadyWorked(db, clientKey(opp))) {
+        ledger.push(opportunityRow({
+          opp,
+          decision: "skipped",
+          reason: "already worked",
+        }));
+        continue;
+      }
+      if (opp.netEdgeCents < 1) {
+        ledger.push(opportunityRow({
+          opp,
+          decision: "skipped",
+          reason: "below min net edge after fees",
+        }));
+        continue;
+      }
+      if (attempted) {
+        ledger.push(opportunityRow({
+          opp,
+          decision: "skipped",
+          reason: "one basket per tick",
+        }));
+        continue;
+      }
+      if (Date.now() - started > TIME_BUDGET_MS) {
+        ledger.push(opportunityRow({
+          opp,
+          decision: "skipped",
+          reason: "time budget",
+        }));
+        continue;
+      }
       lastOpp = opp;
-      const priced = await priceOpportunity(db, opp);
-      const result = await placeBasket(db, client, priced, ts);
+      attempted = true;
+      const result = await placeBasket(db, client, opp, ts);
       if (result.ok) {
         placed++;
+        ledger.push(opportunityRow({
+          opp,
+          decision: "taken",
+          reason: "demo 1 lot",
+          demoOrderId: result.demoOrderId,
+        }));
         await upsertTraderStatus(db, {
           status: "submitted",
           ts,
           event_ticker: opp.eventTicker,
           kind: opp.kind,
         });
-        break;
+        continue;
       }
       lastReject = result.reason;
+      ledger.push(opportunityRow({
+        opp,
+        decision: "taken",
+        reason: result.reason ?? "rejected",
+        demoOrderId: result.demoOrderId,
+      }));
       await upsertTraderStatus(db, {
         status: "rejected",
         ts,
@@ -320,8 +369,9 @@ async function run(): Promise<Response> {
         kind: opp.kind,
         reject_reason: result.reason,
       });
-      break;
     }
+
+    await insertOpportunities(db, ledger);
 
     if (placed === 0 && !lastReject) {
       await upsertTraderStatus(db, { status: "watching", ts });
