@@ -116,8 +116,9 @@ select cron.schedule(
 );
 ```
 
-Leave `KALSHI_TRADING_ENABLED=false` until the demo key is in Vault. The cron
-can run in that state; it will not call Kalshi.
+Leave `KALSHI_TRADING_ENABLED=false` tonight. The cron refreshes tickets and
+does not POST. Approve uses Vault `KALSHI_DEMO_KEY_ID` +
+`KALSHI_DEMO_PRIVATE_KEY_PEM` at click time.
 
 ## What the 5-minute scanner does
 
@@ -131,8 +132,8 @@ Every 5 minutes (unchanged):
 6. Appends an equity point to `portfolio_snapshots` (`paper = true`).
 
 That scanner never authenticates to Kalshi. It is quote history + a simulated
-ledger. The demo trader is a different path: it reads **demo** books and posts
-**demo** orders.
+ledger. The ticket desk is a different path: it reads **production** books and, only
+on human Approve, posts **demo** orders.
 
 ## The detection logic
 
@@ -192,7 +193,8 @@ supabase/functions/approve/index.ts Human skip/approve (demo FOK)
 supabase/migrations/               Schema + cron schedules
 tests/arb.test.ts                  Offline tests for the math
 tests/demo-client.test.ts          Production-host crash + signer
-web/                               Dashboard (Vite + React) + DEMO PAPER strip
+tests/ticket-desk.test.ts          Depth, 49+49, 30s expiry, cron no-POST
+web/                               Ticket desk + Details fold
 ```
 
 `supabase/functions/<name>/` is required by the Supabase CLI.
@@ -236,9 +238,10 @@ not ship a service-role token or a Kalshi PEM to Pages.
 
 Live: https://kapamikey.github.io/kalshi-arb/
 
-The first thing on the page is a `DEMO PAPER` strip: trader status sentence,
-last 3 demo orders, and `Demo books ≠ live. 5-min scanner is still history.`
-Existing health / paper book / snapshots stay below.
+The first thing on the page is the ticket desk: one ticket or
+`Nothing to decide. Watching production books.` Skip is primary. Approve calls
+the server (`approve`); no Kalshi keys in the browser. Health / paper book /
+snapshots sit behind Details.
 
 Local: `cd web && bun install && bun dev` (http://localhost:5173).
 
@@ -246,8 +249,9 @@ Env: copy `web/.env.example`. `VITE_SUPABASE_URL` defaults to the linked project
 `VITE_SUPABASE_ANON_KEY` is the anon/publishable token only.
 If the build omits it, paste on the page (stored in localStorage only).
 
-Apply `supabase/migrations/20260830_dashboard_read.sql` and
-`20260831_demo_orders.sql` (`supabase db push`) so anon SELECT policies exist.
+Apply `supabase/migrations/20260830_dashboard_read.sql`,
+`20260831_demo_orders.sql`, and `20260901_tickets.sql` (`supabase db push`)
+so anon SELECT policies exist.
 Publish `web/dist` to the `gh-pages` branch. Rebuild:
 `cd web && VITE_BASE=/kalshi-arb/ bun run build`.
 
