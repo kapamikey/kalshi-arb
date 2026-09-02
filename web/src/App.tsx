@@ -116,9 +116,11 @@ function TicketDesk({
     try {
       const res = await callTicketAction(url, anonKey, ticket.id, action);
       setResult(res);
-      if (action === "skip" && res.ok) {
-        setTicket(null);
-        setResult(null);
+      if (res.ok) {
+        if (action === "skip") {
+          setTicket(null);
+          setResult(null);
+        }
         await reload();
       }
     } finally {
