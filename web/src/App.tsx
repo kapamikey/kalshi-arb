@@ -194,7 +194,7 @@ export default function App() {
             Set <code>VITE_SUPABASE_ANON_KEY</code> (and optionally{" "}
             <code>VITE_SUPABASE_URL</code>) in <code>web/.env</code>. Never put{" "}
             <code>SUPABASE_SERVICE_ROLE_KEY</code> here. Project:{" "}
-            <code>axdikbsghdotugnotzof</code>. Pasting below stores the anon key in this
+            <code>tymnlqhakjnqwxcainwx</code>. Pasting below stores the anon key in this
             browser only — not an account.
           </p>
           <div className="key-form">
